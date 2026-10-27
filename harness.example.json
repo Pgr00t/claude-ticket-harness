@@ -1,0 +1,26 @@
+{
+  "kind": "python",
+  "test_paths": ["tests/"],
+  "protected_branches": ["main", "master", "release/*"],
+  "suite": {
+    "command": "poetry run pytest tests/unit -q --continue-on-collection-errors -p no:cacheprovider",
+    "typecheck_command": "npx tsc --noEmit",
+    "env_file": ".env.test",
+    "env": { "APP_ENV": "test" },
+    "timeout": 300
+  },
+  "judge": {
+    "model": "claude-fable-5-1",
+    "timeout": 840,
+    "extra_allowed_tools": ["Bash(poetry run pytest *)", "Bash(npx vitest run *)", "Bash(npx tsc *)"]
+  },
+  "ticket_key_regex": "\\b[A-Z]{2,}-\\d+",
+  "worktree_links": ["CLAUDE.md", ".claude", "docs/agents", "TODOS.md", ".env", ".env.test", "node_modules"],
+  "formatters": {
+    "py": "poetry run black -q {file} && poetry run isort --profile black -q {file}",
+    "ts": "npx prettier --loglevel warn --write {file} && npx eslint --fix {file}",
+    "tsx": "npx prettier --loglevel warn --write {file} && npx eslint --fix {file}",
+    "scss": "npx stylelint --fix {file}; npx prettier --loglevel warn --write {file}",
+    "md": ""
+  }
+}

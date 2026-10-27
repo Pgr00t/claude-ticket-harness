@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/link-worktree-local-files.sh\"",
+            "timeout": 30,
+            "statusMessage": "Linking local-only files into worktree..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/format-on-edit.sh\"",
+            "timeout": 90,
+            "statusMessage": "Formatting the edited file with its repo's tools..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/judge-gate.sh\"",
+            "timeout": 900,
+            "statusMessage": "Judge gate: lock check, suite, then the judge..."
+          }
+        ]
+      }
+    ]
+  }
+}

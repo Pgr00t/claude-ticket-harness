@@ -1,0 +1,12 @@
+# Harness state in a target repo is local-only; keep it out of this repo too if it is ever dogfooded here.
+.claude/
+CLAUDE.md
+TODOS.md
+# Editor and OS noise
+.DS_Store
+*.swp
+# Python
+__pycache__/
+*.pyc
+# Backups the hooks' own history used
+*.bak-*
