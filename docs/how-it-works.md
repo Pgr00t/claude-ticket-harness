@@ -35,9 +35,10 @@ The range is `CHECKS_SHA..HEAD` without `--first-parent`, so a branch that merge
 2. **Which repo?** `git -C <path>` wins, then the last `cd <path>` before the push in the command text, then the session's cwd. A path that cannot be entered is a deny, not a pass-through.
 3. **Which branch?** `main`, `master` and `release/*` (or `protected_branches` from the config) are never gated.
 4. **Packet.** `.claude/judge/<branch>.md` must exist, its `CHECKS_SHA` must be a commit, its `HEAD` must be the current HEAD.
-5. **Lock**, as above.
-6. **Suite.** The repo's suite command runs (pytest for a python repo, tsc then vitest for a web one; `kind: other` skips this). Every red id is compared with `.claude/known-failures.txt` as a whole id: a file or class name in the list covers nothing. An unlisted red id is a deny. The judge is never asked about this; see `judge-leniency.md` for why.
-7. **Judge.** `claude -p` with a prompt, the packet, the diff stat and the suite summary; read-only tools only. The report is appended to `.claude/judge/<branch>.verdict.md` with a dated header and a `Usage:` line (tokens, cost, seconds from the CLI's JSON). `VERDICT: PASS` allows the push; anything else denies it with the report.
+5. **Checks commit.** `CHECKS_SHA` must be the first commit after `BASE` that touches a test path (`git rev-list --reverse BASE..HEAD -- <test paths> | head -1`). `BASE` is read from the packet; without a `BASE` line it is the merge-base of HEAD with `base_ref` from the config (default `origin/main`), and a repo with neither is a deny. A packet that named a later commit (a Correct check, the build) would hide every test edit before it from the lock, so the deny names the real checks commit and its title; a branch with no test commit after `BASE` has no checks to lock and is a deny too.
+6. **Lock**, as above, from that verified checks commit.
+7. **Suite.** The repo's suite command runs (pytest for a python repo, tsc then vitest for a web one; `kind: other` skips this). Any red id is a deny, with every id named whole (the pytest node id with its message stripped, the vitest FAIL line without its prefix, a tsc error line as printed). There is no list of accepted failures: a test that is red on the base branch gets its own PR first. The judge is never asked about this; see `judge-leniency.md` for why.
+8. **Judge.** `claude -p` with a prompt, the packet, the diff stat and the suite summary; read-only tools only. The report is appended to `.claude/judge/<branch>.verdict.md` with a dated header and a `Usage:` line (tokens, cost, seconds from the CLI's JSON). `VERDICT: PASS` allows the push; anything else denies it with the report.
 
 Every step is covered by `hooks/tests/test-judge-gate.sh`, which runs the real script against throwaway repos with fake `poetry` and `claude` binaries on PATH. The script was written without tests and debugged in production for two weeks (a filter that over-matched, a `deny()` defined after its first call, an apostrophe that broke a heredoc under bash 3.2, a `git -C` that bypassed the gate, a merge that broke the lock range); each of those is a case now.
 
@@ -55,7 +56,7 @@ The judge's model and timeout come from `judge.model` and `judge.timeout` in the
 
 `.claude/loop-results.md` in the target repo takes one row per round: date, ticket, checks written, round, result, what failed and why, a note for How to work. The note is written only when a habit showed up; a made-up note is worse than none.
 
-Every five rows the skill runs a review: repeats become one-sentence rules in the "How to work" section of `CLAUDE.md`, with the ticket keys they came from; a rule no round has needed is removed. The review never touches Known failures, the Commands table or a test. This is the only place the harness learns, and it only learns if the review runs; the first review on one of the source repos happened after thirteen rows, and found six rules.
+Every five rows the skill runs a review: repeats become one-sentence rules in the "How to work" section of `CLAUDE.md`, with the ticket keys they came from; a rule no round has needed is removed. The review never touches the Suite baseline, the Commands table or a test. This is the only place the harness learns, and it only learns if the review runs; the first review on one of the source repos happened after thirteen rows, and found six rules.
 
 ## The metrics
 
@@ -76,6 +77,7 @@ Everything site-specific lives in `.claude/harness.json` in the target repo. The
 | `kind` | detected: `python` when `pyproject.toml` and `tests/` exist, `web` when `package.json` exists, else `other` | gate |
 | `test_paths` | `["tests/"]`; for web `["*.test.ts","*.test.tsx","*.spec.ts","*.spec.tsx","__tests__/*"]` | gate (lock pathspecs and the paths red ids must start under) |
 | `protected_branches` | `["main","master","release/*"]` (globs) | gate |
+| `base_ref` | `origin/main`; the ref the checks-commit rule takes its merge-base from when the packet has no `BASE` line | gate |
 | `suite.command` | python: `poetry run pytest tests/unit -q --continue-on-collection-errors -p no:cacheprovider`; web: `npx vitest run` | gate |
 | `suite.typecheck_command` | web: `npx tsc --noEmit` | gate |
 | `suite.env_file` | `.env.test` (loaded line by line, `KEY=value` lines only, before the suite) | gate |
@@ -88,7 +90,7 @@ Everything site-specific lives in `.claude/harness.json` in the target repo. The
 | `worktree_links` | `["CLAUDE.md",".claude","docs/agents","TODOS.md",".env",".env.test","node_modules"]` | link hook (read from the main checkout) |
 | `formatters` | the defaults above, keyed by extension; `{file}` is the path, `""` disables | format hook |
 
-Two things stay hard-coded on purpose. The packet is always `.claude/judge/<branch>.md` and the known-failures list `.claude/known-failures.txt`, because the skill, the gate and the metrics helper all name them. The Correct-check title is `<anything>: Correct check <name>` so the key format never matters to the lock.
+Two things stay hard-coded on purpose. The packet is always `.claude/judge/<branch>.md`, because the skill, the gate and the metrics helper all name it. The Correct-check title is `<anything>: Correct check <name>` so the key format never matters to the lock.
 
 ## Files the harness writes in a target repo
 
@@ -97,7 +99,6 @@ All under `.claude/`, which stays untracked (`.git/info/exclude`):
 | file | written by | read by |
 |---|---|---|
 | `harness.json` | you | every hook |
-| `known-failures.txt` | you (one whole test id per line, comments allowed) | gate |
 | `judge/<branch>.plan.md` | the session, at plan approval (optional) | metrics (plan time) |
 | `judge/<branch>.md` | the session, step 7 | gate, judge, metrics |
 | `judge/<branch>.verdict.md` | the gate, appended per run | metrics, you |

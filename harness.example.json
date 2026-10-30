@@ -2,6 +2,7 @@
   "kind": "python",
   "test_paths": ["tests/"],
   "protected_branches": ["main", "master", "release/*"],
+  "base_ref": "origin/main",
   "suite": {
     "command": "poetry run pytest tests/unit -q --continue-on-collection-errors -p no:cacheprovider",
     "typecheck_command": "npx tsc --noEmit",

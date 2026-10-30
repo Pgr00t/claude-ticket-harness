@@ -32,9 +32,9 @@ Three things make it worse than an ordinary wrong answer.
 
 The response was not a better prompt for step 6. It was to take step 6 away from the judge.
 
-1. **The script runs the suite and does the comparison.** The gate loads the test env, runs the suite command, extracts every `FAILED <id>` and `ERROR <path>` line, and compares each id with `.claude/known-failures.txt`. An unlisted id is a deny with the id in the reason. The judge is never started.
+1. **The script runs the suite and does the comparison.** The gate loaded the test env, ran the suite command, extracted every `FAILED <id>` and `ERROR <path>` line, and compared each id with `.claude/known-failures.txt`. An unlisted id was a deny with the id in the reason, and the judge was never started. (Since 2026-10-30 the list is gone and any red id is a deny; see below.)
 2. **The judge is told the fact is settled.** Its prompt now says, verbatim: the lock and the suite "were both checked mechanically before you were called (suite summary: ...). Do not re-judge either; do not fail step 1 on the lock, and do not explain away any number. More generally: never rationalise a discrepancy. If the evidence for a step is missing or you could not check it, that step is a FAIL, not a PASS with a caveat."
-3. **The list moved out of prose.** Known failures became a file with one id per line, so a script could read it. `CLAUDE.md` points at the file.
+3. **The list moved out of prose.** Known failures became a file with one id per line, so a script could read it. `CLAUDE.md` pointed at the file.
 4. **The red test was added to the list with a dated note**, which is what should have happened days earlier.
 
 The principle: a script owns every fact the gate depends on. The judge gets only the questions that need a reader.
@@ -43,7 +43,9 @@ The principle: a script owns every fact the gate depends on. The judge gets only
 
 **2026-10-14, the judge was right and the fact still moved into the script.** On the first real ticket the judge returned FAIL on one point: a fixture fix in an unrelated test, committed after the checks commit under a `Correct check` title. The script had allowed it (the title matched). The judge read it as a lock break, which it was. The fix was not "trust the judge on this": the script gained the rule that a Correct check commit may only touch test files the checks commit itself touched (`git show --name-only`, subset check), and the judge was told the lock is not its job either. Same principle from the other side: a judgement that turns out to be a fact becomes code.
 
-**2026-10-27, the fact check itself was found to be loose.** The script's comparison was a substring match (`grep -F` without `-x`). Two of the four entries in the list were a whole file name and a whole class name, so any new red test in that file or class matched and was invisible. The comparison became exact (`grep -x -F`), the list was rewritten to whole ids, and `CLAUDE.md`'s section with it. A fact check that is not exact is not a fact check; it is the judge's rationalisation with the model removed. A week later the list was emptied altogether by fixing the red tests, which is the simpler gate.
+**2026-10-27, the fact check itself was found to be loose.** The script's comparison was a substring match (`grep -F` without `-x`). Two of the four entries in the list were a whole file name and a whole class name, so any new red test in that file or class matched and was invisible. The comparison became exact (`grep -x -F`), the list was rewritten to whole ids, and `CLAUDE.md`'s section with it. A fact check that is not exact is not a fact check; it is the judge's rationalisation with the model removed. A week later the list was emptied altogether by fixing the red tests, and on 2026-10-30 the mechanism was removed from the gate: with a green base branch, any red test is a deny, every id named whole, and a leftover list file is ignored. The simplest fact check is the one with nothing to compare against.
+
+**2026-10-30, a fact the script was taking on trust.** The lock scans `CHECKS_SHA..HEAD`, and `CHECKS_SHA` came from the packet, written by the builder. A packet that named a later commit, a Correct check or the build itself, moved the start of the scan forward and hid every test edit before it; one real packet did exactly that, naming its Correct check commit, and the gate accepted it. The judge, asked in an eval to spot a wrong `CHECKS_SHA` from the log, did spot it, and that was still the wrong place for the fact: the checks commit is a thing git knows, the first commit after `BASE` that touches a test path. The gate now computes it and refuses any packet that names another commit, with the real one and its title in the reason.
 
 ## What the judge is still trusted with
 
@@ -60,11 +62,12 @@ Across the first thirty-two verdicts the judge returned one FAIL, and it was the
 
 `hooks/tests/test-judge-gate.sh` runs the real gate with a fake suite and a fake judge. These cases exist because of this story:
 
-- `an unlisted red test is refused and named`: the deny reason carries the id.
-- `the judge is not called when an unlisted red test exists (the script owns that fact)`: the fake judge records its arguments to a file; the case asserts the file was never written.
-- `a class name alone does not cover a red test in that class`, `a file name alone does not cover a red test in that file`, `a longer id does not cover a shorter one`: the 2026-10-27 lesson, as three mutants of the list.
-- `with two red tests and one listed, the other is named` and `the listed red test is not named as unknown`: the comparison is per id, both ways.
-- `the judge prompt carries the suite summary and says the comparison was mechanical` and `the judge prompt forbids rationalising and re-judging the mechanical checks`: the fake judge's recorded arguments contain the prompt, so the sentences above are pinned as text.
+- `a red test is refused and named by its whole id`: the deny reason carries the id, with the failure message stripped.
+- `the judge is not called when a red test exists (the script owns that fact)`: the fake judge records its arguments to a file; the case asserts the file was never written.
+- `with two red tests the second is named` and `and the first is named too`: every red id is in the reason.
+- `a leftover known-failures.txt no longer excuses a red test`: the 2026-10-27 lesson's end point; the list has no reader.
+- `a packet naming a later Correct check commit as CHECKS_SHA is refused` and `and the real checks commit is named with its short sha and title`: the 2026-10-30 rule; `a packet naming the build commit as CHECKS_SHA is refused` and `a branch with no test commit after BASE is refused` are its other two shapes.
+- `the judge prompt carries the suite summary and says the suite was checked mechanically` and `the judge prompt forbids rationalising and re-judging the mechanical checks`: the fake judge's recorded arguments contain the prompt, so the sentences above are pinned as text.
 - `a Correct check touching a test file the checks commit did not is refused`: the 2026-10-14 rule.
 
 If someone later "simplifies" the gate by handing the suite back to the judge, the second case fails first.

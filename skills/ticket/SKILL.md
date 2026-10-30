@@ -10,7 +10,7 @@ One ticket, one session, one PR. The session starts with a five-line spec and a 
 
 The loop inside the session is: write the checks, lock them, build until the checks are green, verify against the running thing, log the round. The checks are the contract; the builder may not touch them once they are committed.
 
-The argument is a ticket key (`KEY-123`) or a ticket URL. Repo facts live in `CLAUDE.md` (layout, commands, deploy paths, conventions, Known failures, How to work) and in `docs/agents/`. Read `CLAUDE.md` before step 1 and treat it as the source of truth over anything written here. Its Layout line names the source tree and the test paths; below, `<src>` and `<tests>` mean those.
+The argument is a ticket key (`KEY-123`) or a ticket URL. Repo facts live in `CLAUDE.md` (layout, commands, deploy paths, conventions, Suite baseline, How to work) and in `docs/agents/`. Read `CLAUDE.md` before step 1 and treat it as the source of truth over anything written here. Its Layout line names the source tree and the test paths; below, `<src>` and `<tests>` mean those.
 
 ## 1. Read the ticket
 
@@ -66,15 +66,15 @@ If the session is already on a branch for this ticket (a worktree the app create
 
 Write the tests from the plan's Checks list in `<tests>` (CLAUDE.md says where unit and integration tests live and how test files are named). Do not touch `<src>` yet.
 
-Run the new tests. Every one must be red, and red for the reason the plan gives (an assertion on the missing behaviour, not an import error or a typo). A check that passes before the feature exists is not a check: fix the check. Run the full unit suite too; nothing outside Known failures may have changed.
+Run the new tests. Every one must be red, and red for the reason the plan gives (an assertion on the missing behaviour, not an import error or a typo). A check that passes before the feature exists is not a check: fix the check. Run the full unit suite too; nothing else may have gone red.
 
 Commit the tests alone, title `<KEY>: Add checks for <behaviour>`. Record the commit hash as `CHECKS_SHA`; it goes in the PR body and in the round log.
 
-From this commit on, `<tests>` is locked for the session. If a check turns out to be wrong during the build, stop, write down why in the round log, and fix it in a separate commit titled `<KEY>: Correct check <name>` with the reason in the body. That commit replaces `CHECKS_SHA`. A silent edit to a test is a failed round. A Correct check commit may touch only test files the checks commit itself created or changed. A fix to any other test, a stale fixture in an unrelated file for example, is out of scope for this branch: put it on its own branch from `origin/main` as its own small PR, or rebase it to sit before the checks commit and regenerate the packet. The push gate enforces this mechanically.
+From this commit on, `<tests>` is locked for the session. If a check turns out to be wrong during the build, stop, write down why in the round log, and fix it in a separate commit titled `<KEY>: Correct check <name>` with the reason in the body. `CHECKS_SHA` stays the checks commit: the gate refuses a packet that names the Correct check commit instead. A silent edit to a test is a failed round. A Correct check commit may touch only test files the checks commit itself created or changed. A fix to any other test, a stale fixture in an unrelated file for example, is out of scope for this branch: put it on its own branch from `origin/main` as its own small PR, or rebase it to sit before the checks commit and regenerate the packet. The push gate enforces this mechanically.
 
 Optional belt and braces when the user is still present: if a write-freeze skill is installed, point it at `<src>` so Edit and Write outside it are refused for the rest of the session. The mechanical gate in step 6 and the push gate in step 7 hold either way.
 
-Done when: the checks commit exists, every new test is red for its stated reason, and the suite otherwise matches Known failures.
+Done when: the checks commit exists, every new test is red for its stated reason, and the rest of the suite is green.
 
 ## 5. Build
 
@@ -98,15 +98,15 @@ Done when: every check from step 4 is green and the refactor pass has run.
 4. The format and lint checks CI runs (`CLAUDE.md` names the commands).
 5. Review fan-out. Spawn three review subagents in parallel on `git diff $CHECKS_SHA HEAD`, each given the spec and one question only: does the code do what the Goal line says and nothing else; do the checks actually test the Acceptance line or could they pass vacuously; is every new function reachable from an endpoint, task or existing caller. The checks reviewer should mutate the build (flip a comparison, ignore an argument, drop a branch) and name every mutant the checks let live. Each returns findings with file and line. Fix the real ones, note the rest in the PR body under Out of scope, and run steps 1 to 4 again if anything changed.
 
-Compare failures against Known failures in `CLAUDE.md`. A failure not on that line is yours: fix it before moving on. Record the counts you saw; they go in the PR body.
+Every failure is yours: fix it before moving on. A test that is already red on the base branch gets its own PR from the base branch first (the gate accepts no red test). Record the counts you saw; they go in the PR body.
 
 Append one line to `.claude/loop-results.md` for the ticket: date, key, number of checks, rounds taken, `green` or `stuck`, what failed along the way and why, and one note for How to work if a habit showed up (a check that was vacuous, a wiring gap the Verify line caught, a plan edit that was wrong). No note is fine; a made-up note is not.
 
-Done when: the gate is clean, the Verify line passed, the only red tests are the ones Known failures lists, format and lint are clean, and the round is logged.
+Done when: the gate is clean, the Verify line passed, the suite is green, format and lint are clean, and the round is logged.
 
 ## 7. Open the PR
 
-Write the judge packet first, at `.claude/judge/<branch>.md`, in exactly this shape (the gate script parses the two `KEY: value` lines, so keep them on their own lines near the top):
+Write the judge packet first, at `.claude/judge/<branch>.md`, in exactly this shape (the gate script parses the `CHECKS_SHA`, `HEAD` and `BASE` lines, so keep them on their own lines near the top):
 
 ```
 # Judge packet: <branch>
@@ -127,7 +127,9 @@ Goal: ...  Acceptance: ...  Out of scope: ...  Verify: ...  Files: ...   (the fi
 <the Verify command, then its output>
 ```
 
-The push is gated by `~/.claude/hooks/judge-gate.sh`, a PreToolUse hook on every real push. It refuses the push, with the reason returned to you, when any of these fail: no packet; packet `HEAD` is not the current HEAD; uncommitted changes in `<tests>`; a commit after `CHECKS_SHA` touching `<tests>` whose title is not `<KEY>: Correct check ...`; a Correct check commit touching a test file the checks commit did not; a red test not listed in `.claude/known-failures.txt`. It then runs the suite itself (the command in `.claude/harness.json`) and hands the summary, the diff stat and the packet to a headless judge, which reads the checks, the diff and the Verify output and ends with `VERDICT: PASS` or `VERDICT: FAIL`. The verdict is appended to `<branch>.verdict.md` beside the packet, one dated section per run with a `Usage:` line (the judge's tokens and cost), so a FAIL followed by a PASS leaves both. On FAIL, fix what it names, re-run step 6, rewrite the packet with the new HEAD, and push again. Never edit the packet to argue with the judge, and never edit `.claude/judge/*.verdict.md`. If the gate says the claude CLI is not logged in, stop and tell the user; that is a one-time `claude login` on their side.
+`CHECKS_SHA` must be the first commit after `BASE` that touches `<tests>`, which the gate computes from git itself; a Correct check commit is never the `CHECKS_SHA`.
+
+The push is gated by `~/.claude/hooks/judge-gate.sh`, a PreToolUse hook on every real push. It refuses the push, with the reason returned to you, when any of these fail: no packet; packet `HEAD` is not the current HEAD; `CHECKS_SHA` is not the first commit after `BASE` that touches `<tests>`; uncommitted changes in `<tests>`; a commit after `CHECKS_SHA` touching `<tests>` whose title is not `<KEY>: Correct check ...`; a Correct check commit touching a test file the checks commit did not; any red test (there is no accepted-failures list). It then runs the suite itself (the command in `.claude/harness.json`) and hands the summary, the diff stat and the packet to a headless judge, which reads the checks, the diff and the Verify output and ends with `VERDICT: PASS` or `VERDICT: FAIL`. The verdict is appended to `<branch>.verdict.md` beside the packet, one dated section per run with a `Usage:` line (the judge's tokens and cost), so a FAIL followed by a PASS leaves both. On FAIL, fix what it names, re-run step 6, rewrite the packet with the new HEAD, and push again. Never edit the packet to argue with the judge, and never edit `.claude/judge/*.verdict.md`. If the gate says the claude CLI is not logged in, stop and tell the user; that is a one-time `claude login` on their side.
 
 Push the branch with `git -C <repo root> push -u origin <branch>` so the gate judges the right repo. Open the PR with `gh pr create` against `main`. When `gh` is not authenticated, write a prefilled compare link instead and give it to the user:
 
@@ -159,7 +161,7 @@ When `.claude/loop-results.md` has five or more rows since the last review marke
 
 1. Read every row since the marker. Look for the same failure or note appearing twice or more.
 2. For each repeat, write one rule in the "How to work" section of `CLAUDE.md`: what to do differently, in one sentence, with the ticket keys it came from. Remove a rule that no round has needed since it was written.
-3. Never change Known failures, the Commands table, or any file in `<tests>` from this review. The review edits habits, not checks.
+3. Never change the Suite baseline, the Commands table, or any file in `<tests>` from this review. The review edits habits, not checks.
 4. Append a row `| <date> | review | | | marker | | <n> rules changed |` to the log.
 
 Done when: the user has been told the PR is merged or what still blocks it, in one message, and the review row exists if one was due.

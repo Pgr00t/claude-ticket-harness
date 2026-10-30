@@ -96,6 +96,23 @@ HEAD_SHA=$(git rev-parse HEAD)
 [ -n "$CHECKS_SHA" ] && git cat-file -e "$CHECKS_SHA^{commit}" 2>/dev/null || deny "judge gate: packet has no valid CHECKS_SHA line."
 [ -n "$PKT_HEAD" ] && [ "$HEAD_SHA" = "$(git rev-parse "$PKT_HEAD" 2>/dev/null)" ] || deny "judge gate: packet HEAD ($PKT_HEAD) is not the current HEAD ($HEAD_SHA). Re-run verify and rewrite the packet for this commit."
 
+# The checks commit is a fact git knows: the first commit after BASE that touches a test path. A packet that
+# named a later commit (a Correct check, the build) would hide every test edit before it from the lock below.
+# BASE comes from the packet; without a BASE line it is the merge-base with config `base_ref` (default origin/main).
+BASE_REF=$(cfg '.base_ref' 'origin/main')
+BASE=$(grep -E -m1 '^BASE:' "$PACKET" | awk '{print $2}')
+if [ -n "$BASE" ]; then
+  git cat-file -e "$BASE^{commit}" 2>/dev/null || deny "judge gate: packet BASE ($BASE) is not a commit. Write the $BASE_REF sha the branch started from."
+else
+  git rev-parse -q --verify "$BASE_REF^{commit}" >/dev/null 2>&1 || deny "judge gate: packet has no BASE line and $BASE_REF does not exist here, so the checks commit cannot be located. Add 'BASE: <the $BASE_REF sha the branch started from>' to the packet."
+  BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null) || deny "judge gate: packet has no BASE line and HEAD shares no history with $BASE_REF. Add 'BASE: <the $BASE_REF sha the branch started from>' to the packet."
+fi
+FIRST=$(git rev-list --reverse "$BASE..HEAD" -- "${TEST_PATHSPEC[@]}" | head -1)
+[ -n "$FIRST" ] || deny "judge gate: no commit after BASE ($(git rev-parse --short "$BASE")) touches a test path, so there is no checks commit to lock. Write and commit the checks first (/ticket step 4), then the packet."
+if [ "$(git rev-parse "$CHECKS_SHA^{commit}")" != "$FIRST" ]; then
+  deny "judge gate: packet CHECKS_SHA ($(git rev-parse --short "$CHECKS_SHA")) is not the first commit after BASE that touches a test path; that is $(git rev-parse --short "$FIRST") '$(git log -1 --format=%s "$FIRST")'. The packet must name the first test-touching commit after BASE; a Correct check commit is never the CHECKS_SHA."
+fi
+
 # Mechanical lock: tests/ untouched since the checks commit, except "Correct check" commits.
 DIRTY=$(git status --porcelain -- "${TEST_PATHSPEC[@]}" | head -5)
 [ -z "$DIRTY" ] || deny "judge gate: uncommitted changes to test files (checks are locked after $CHECKS_SHA):"$'\n'"$DIRTY"
@@ -112,11 +129,10 @@ for c in $(git rev-list "$CHECKS_SHA..HEAD" -- "${TEST_PATHSPEC[@]}"); do
 done
 [ -z "$OUTSIDE" ] || deny "judge gate: a 'Correct check' commit touches test files that are not this ticket's checks (not in $CHECKS_SHA). Unrelated test fixes go on their own branch from the base branch as their own PR, or are rebased to sit before the checks commit (then regenerate the packet):$OUTSIDE"
 
-# Mechanical suite run and known-failures comparison (deterministic; the judge is not asked about tests).
+# Mechanical suite run (deterministic; the judge is not asked about tests). Any red test refuses the push:
+# there is no accepted-failures list. A test that is already red on the base branch gets its own PR first.
 SUITE=""
 if [ "$KIND" != other ]; then
-  KNOWN=".claude/known-failures.txt"
-  [ -f "$KNOWN" ] || deny "judge gate: $KNOWN is missing. It lists the accepted red items (see CLAUDE.md, Known failures)."
   SUITE_TIMEOUT=$(cfg '.suite.timeout' 300)
   # Config `suite.env_file` is loaded line by line (KEY=value lines only); `suite.env` values are
   # defaults, applied only to variables that are still unset.
@@ -146,18 +162,15 @@ if [ "$KIND" != other ]; then
     SUITE="tsc errors: $(printf '%s' "$TSC" | grep -c . ); vitest: $(printf '%s\n' "$RAW" | grep -E '^ +Tests ' | sed 's/^ *//')"
     RED=$(printf '%s\n%s\n' "$(printf '%s\n' "$RAW" | grep -E '^ FAIL ' | sed 's/^ *//')" "$TSC" | grep -v '^$' || true)
   fi
-  # Known items match a whole id, never a substring (a file or class name alone would hide every new red
-  # test inside it). One id per red line: pytest "FAILED <nodeid> - <message>" / "ERROR <path> - <message>";
+  # One id per red line: pytest "FAILED <nodeid> - <message>" / "ERROR <path> - <message>";
   # vitest " FAIL  <file> > <name>" with the prefix removed; a tsc "error TS" line as printed.
-  PATTERNS=$(grep -v -E '^[[:space:]]*(#|$)' "$KNOWN" | sed -E 's/[[:space:]]+$//' || true)
   if [ -n "$RED" ]; then
     if [ "$KIND" = python ]; then
       IDS=$(printf '%s\n' "$RED" | sed -E 's/^(FAILED|ERROR)[[:space:]]+//; s/[[:space:]]+-[[:space:]].*$//; s/[[:space:]]+$//')
     else
       IDS=$(printf '%s\n' "$RED" | sed -E 's/^FAIL[[:space:]]+//; s/[[:space:]]+$//')
     fi
-    if [ -n "$PATTERNS" ]; then UNKNOWN=$(printf '%s\n' "$IDS" | grep -v -x -F -f <(printf '%s\n' "$PATTERNS") || true); else UNKNOWN="$IDS"; fi
-    [ -z "$UNKNOWN" ] || deny "judge gate: red tests not listed in $KNOWN (suite: $SUITE). Each line of that file is one whole test id (the pytest node id, or the vitest FAIL line without its prefix); a file or class name alone matches nothing. Fix them or, if they are pre-existing on the base branch, add the ids with a dated comment:"$'\n'"$UNKNOWN"
+    deny "judge gate: the suite is not green (suite: $SUITE). There is no accepted-failures list: every red test below is this branch's to fix; one that is already red on the base branch gets its own PR from the base branch first, then rebase:"$'\n'"$IDS"
   fi
 fi
 
@@ -167,14 +180,14 @@ PROMPT=$(cat <<PEOF
 You are the judge for branch $BRANCH, about to be pushed. You decide whether it is done. You never edit files. Be strict; a builder is most likely to have fooled itself on vacuous checks and unwired code.
 
 Read, in this order:
-1. CLAUDE.md (the Known failures section and Conventions).
+1. CLAUDE.md (Conventions and How to work).
 2. The judge packet at $PACKET: the five-line spec (Goal, Acceptance, Out of scope, Verify, Files), the Verify command and its output, and the round count. Trust the packet for the spec text only.
 3. The checks: run \`git show $CHECKS_SHA --stat\` and read every test file it adds or changes. Each test must assert the behaviour in the Acceptance line. A test that would pass without the feature (asserts on a mock it set itself, asserts only that something exists or returns anything, never calls the code under test) is vacuous: FAIL, naming the test.
 4. The code: run \`git diff $CHECKS_SHA HEAD -- . $DIFF_EXCLUDE\` and read it. Every change must serve the Goal line. Anything the Out of scope line excludes is a FAIL.
 5. Wiring: for each new function, method or class in that diff, find a caller in the diff or in existing code with Grep. New code with no caller is a FAIL unless the spec says it is for a later ticket.
 6. Verify evidence: the packet must show the Verify command and output demonstrating the Acceptance line. Missing or unconvincing output is a FAIL.
 
-The test-file lock (nothing in the test paths changed after the checks commit except Correct-check commits limited to the test files of this ticket) and the unit suite (compared against the known-failures list) were both checked mechanically before you were called (suite summary: $SUITE). Do not re-judge either; do not fail step 1 on the lock, and do not explain away any number. More generally: never rationalise a discrepancy. If the evidence for a step is missing or you could not check it, that step is a FAIL, not a PASS with a caveat.
+The test-file lock (nothing in the test paths changed after the checks commit except Correct-check commits limited to the test files of this ticket) and the unit suite (every test green) were both checked mechanically before you were called (suite summary: $SUITE). Do not re-judge either; do not fail step 1 on the lock, and do not explain away any number. More generally: never rationalise a discrepancy. If the evidence for a step is missing or you could not check it, that step is a FAIL, not a PASS with a caveat.
 
 Diff stat since the checks commit:
 $DIFF_STAT

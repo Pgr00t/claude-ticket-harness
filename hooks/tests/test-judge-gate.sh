@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for hooks/judge-gate.sh: the command filter, the target-repo rules, the packet and lock checks,
-# the exact-id known-failures comparison, the config file, and the judge round trip. Everything runs
+# the checks-commit rule, the green-suite requirement, the config file, and the judge round trip. Everything runs
 # against throwaway git repos under a temp dir, with fake `poetry` and `claude` binaries first on PATH,
 # so no real suite runs and no real judge is started. Nothing outside the temp dir is touched.
 #
@@ -53,13 +53,15 @@ new_repo() { # $1 = path; python repo on KEY-1-thing with a checks commit, a bui
   printf 'def test_new(): assert False\n' > "$R/tests/test_new.py"
   gitq "$R" add -A; gitq "$R" commit -qm 'KEY-1: Add checks for thing'
   printf 'x = 1\n' > "$R/app/a.py"; gitq "$R" add -A; gitq "$R" commit -qm 'KEY-1: Build thing'
-  : > "$R/.claude/known-failures.txt"
   packet "$R"
 }
 checks_sha() { git -C "$1" log --format=%H --grep='Add checks' -1; }
-packet() { # $1 = repo, $2 = HEAD to claim (default: real HEAD), $3 = CHECKS_SHA to claim (default: real)
-  local R="$1" H="${2:-$(git -C "$1" rev-parse HEAD)}" C="${3:-$(checks_sha "$1")}"
-  printf '# Judge packet: KEY-1-thing\nCHECKS_SHA: %s\nHEAD: %s\nBASE: x\nROUNDS: 1\n' "$C" "$H" > "$R/.claude/judge/KEY-1-thing.md"
+packet() { # $1 = repo, $2 = HEAD to claim (default: real HEAD), $3 = CHECKS_SHA to claim (default: real), $4 = BASE to claim (default: main)
+  local R="$1" H="${2:-$(git -C "$1" rev-parse HEAD)}" C="${3:-$(checks_sha "$1")}" B="${4:-$(git -C "$1" rev-parse main)}"
+  printf '# Judge packet: KEY-1-thing\nCHECKS_SHA: %s\nHEAD: %s\nBASE: %s\nROUNDS: 1\n' "$C" "$H" "$B" > "$R/.claude/judge/KEY-1-thing.md"
+}
+packet_nobase() { # like packet, but without a BASE line, so the gate must fall back to the merge-base with base_ref
+  packet "$1"; sed -i.orig '/^BASE:/d' "$1/.claude/judge/KEY-1-thing.md"; rm -f "$1/.claude/judge/KEY-1-thing.md.orig"
 }
 commit_all() { gitq "$1" add -A; gitq "$1" commit -qm "$2"; }
 config() { printf '%s\n' "$2" > "$1/.claude/harness.json"; }  # $1 = repo, $2 = JSON text
@@ -133,45 +135,52 @@ R="$T/lock-app"; new_repo "$R"
 printf 'x = 2\n' > "$R/app/a.py"; commit_all "$R" 'KEY-1: Tidy'; packet "$R"
 run_gate "$PUSH" "$R"; expect_pass 'app commits after the checks commit do not trip the lock'
 
-echo "# suite versus known-failures: whole ids only, and the judge is never asked about the suite"
+echo "# suite must be green: every red id is named, and the judge is never asked about the suite"
 R="$T/suite"; new_repo "$R"
-rm "$R/.claude/known-failures.txt"; run_gate "$PUSH" "$R"; expect_deny 'a python repo without known-failures.txt is refused' 'is missing'
-: > "$R/.claude/known-failures.txt"
 red_suite 'FAILED tests/test_x.py::TestA::test_b - AssertionError: boom'
 rm -f "$FAKE_CLAUDE_ARGS"
-run_gate "$PUSH" "$R"; expect_deny 'an unlisted red test is refused and named' 'tests/test_x.py::TestA::test_b'
-[ ! -e "$FAKE_CLAUDE_ARGS" ] && ok 'the judge is not called when an unlisted red test exists (the script owns that fact)' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge is not called when an unlisted red test exists (the script owns that fact)'; }
-printf 'tests/test_x.py::TestA::test_b\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_pass 'a red test listed by its whole id is accepted'
-grep -q 'suite summary: 1 failed, 1 passed in 0.01s' "$FAKE_CLAUDE_ARGS" && ok 'the judge prompt carries the suite summary and says the comparison was mechanical' || { OUT="$(grep -o 'suite summary[^.]*' "$FAKE_CLAUDE_ARGS")"; bad 'the judge prompt carries the suite summary and says the comparison was mechanical'; }
-grep -q 'never rationalise a discrepancy' "$FAKE_CLAUDE_ARGS" && grep -q 'Do not re-judge either' "$FAKE_CLAUDE_ARGS" && ok 'the judge prompt forbids rationalising and re-judging the mechanical checks' || { OUT="(prompt text missing)"; bad 'the judge prompt forbids rationalising and re-judging the mechanical checks'; }
-printf 'tests/test_x.py::TestA\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_deny 'a class name alone does not cover a red test in that class' 'tests/test_x.py::TestA::test_b'
-printf 'tests/test_x.py\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_deny 'a file name alone does not cover a red test in that file' 'tests/test_x.py::TestA::test_b'
-printf 'tests/test_x.py::TestA::test_b_extra\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_deny 'a longer id does not cover a shorter one' 'tests/test_x.py::TestA::test_b'
-printf '# comment\n\n  \ntests/test_x.py::TestA::test_b   \n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_pass 'comments, blank lines and trailing spaces in the list are ignored'
+run_gate "$PUSH" "$R"; expect_deny 'a red test is refused and named by its whole id' 'tests/test_x.py::TestA::test_b'
+printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q 'AssertionError' && bad 'the failure message is stripped from the id' || ok 'the failure message is stripped from the id'
+[ ! -e "$FAKE_CLAUDE_ARGS" ] && ok 'the judge is not called when a red test exists (the script owns that fact)' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge is not called when a red test exists (the script owns that fact)'; }
 red_suite 'FAILED tests/test_x.py::TestA::test_b - AssertionError: boom' 'FAILED tests/test_y.py::test_c - KeyError: 1'
-printf 'tests/test_x.py::TestA::test_b\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_deny 'with two red tests and one listed, the other is named' 'tests/test_y.py::test_c'
-printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q 'tests/test_x.py::TestA::test_b' && { OUT="(listed id was named)"; bad 'the listed red test is not named as unknown'; } || ok 'the listed red test is not named as unknown'
+run_gate "$PUSH" "$R"; expect_deny 'with two red tests the second is named' 'tests/test_y.py::test_c'
+printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q 'tests/test_x.py::TestA::test_b' && ok 'and the first is named too' || bad 'and the first is named too'
 red_suite 'ERROR tests/test_c.py - ImportError: cannot import name X'
-printf 'tests/test_c.py\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_pass 'a collection error is listed by its file path'
+run_gate "$PUSH" "$R"; expect_deny 'a collection error is refused and named by its file path' 'tests/test_c.py'
 red_suite 'FAILED tests/test_d.py::test_e'
-printf 'tests/test_d.py::test_e\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_pass 'a FAILED line without a message still yields the id'
+run_gate "$PUSH" "$R"; expect_deny 'a FAILED line without a message still yields the id' 'tests/test_d.py::test_e'
 red_suite 'FAILED tests/test_p.py::test_q[a-b] - assert 1 == 2'
-printf 'tests/test_p.py::test_q[a-b]\n' > "$R/.claude/known-failures.txt"
-run_gate "$PUSH" "$R"; expect_pass 'a parametrised id with a hyphen inside the brackets is kept whole'
+run_gate "$PUSH" "$R"; expect_deny 'a parametrised id with a hyphen inside the brackets is named whole' 'tests/test_p.py::test_q[a-b]'
+printf 'tests/test_x.py::TestA::test_b\n' > "$R/.claude/known-failures.txt"
+red_suite 'FAILED tests/test_x.py::TestA::test_b - AssertionError: boom'
+run_gate "$PUSH" "$R"; expect_deny 'a leftover known-failures.txt no longer excuses a red test' 'tests/test_x.py::TestA::test_b'
+rm "$R/.claude/known-failures.txt"
 { printf 'FAILED something the test printed\n'; printf '..\n2 passed in 0.01s\n'; } > "$FAKE_PYTEST_OUT"
-: > "$R/.claude/known-failures.txt"
 run_gate "$PUSH" "$R"; expect_pass 'a FAILED line outside the test paths is test output, not a red id'
-green_suite; : > "$R/.claude/known-failures.txt"
-R="$T/other"; new_repo "$R"; rm "$R/pyproject.toml" "$R/.claude/known-failures.txt"; commit_all "$R" 'KEY-1: Build thing more'; packet "$R"
+green_suite; run_gate "$PUSH" "$R"; expect_pass 'a green suite reaches the judge'
+grep -q 'suite summary: 2 passed in 0.01s' "$FAKE_CLAUDE_ARGS" && ok 'the judge prompt carries the suite summary and says the suite was checked mechanically' || { OUT="$(grep -o 'suite summary[^.]*' "$FAKE_CLAUDE_ARGS")"; bad 'the judge prompt carries the suite summary and says the suite was checked mechanically'; }
+grep -q 'never rationalise a discrepancy' "$FAKE_CLAUDE_ARGS" && grep -q 'Do not re-judge either' "$FAKE_CLAUDE_ARGS" && ok 'the judge prompt forbids rationalising and re-judging the mechanical checks' || { OUT="(prompt text missing)"; bad 'the judge prompt forbids rationalising and re-judging the mechanical checks'; }
+R="$T/other"; new_repo "$R"; rm "$R/pyproject.toml"; commit_all "$R" 'KEY-1: Build thing more'; packet "$R"
 run_gate "$PUSH" "$R"; expect_pass 'a repo that is neither python nor web skips the suite and still reaches the judge'
+
+echo "# checks commit is the first test commit after BASE"
+R="$T/first-correct"; new_repo "$R"
+printf 'def test_new(): assert 1 == 1\n' > "$R/tests/test_new.py"; commit_all "$R" 'KEY-1: Correct check test_new'
+packet "$R" "" "$(git -C "$R" rev-parse HEAD)"
+run_gate "$PUSH" "$R"; expect_deny 'a packet naming a later Correct check commit as CHECKS_SHA is refused' 'first commit after BASE'
+printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -qF "$(git -C "$R" rev-parse --short "$(checks_sha "$R")") 'KEY-1: Add checks for thing'" && ok 'and the real checks commit is named with its short sha and title' || bad 'and the real checks commit is named with its short sha and title'
+packet "$R"; run_gate "$PUSH" "$R"; expect_pass 'the same branch passes once the packet names the real checks commit'
+R="$T/first-build"; new_repo "$R"; packet "$R" "" "$(git -C "$R" rev-parse HEAD)"
+run_gate "$PUSH" "$R"; expect_deny 'a packet naming the build commit as CHECKS_SHA is refused' 'first commit after BASE'
+R="$T/first-none"; new_repo "$R"; gitq "$R" checkout -q main; gitq "$R" branch -D KEY-1-thing; gitq "$R" checkout -qb KEY-1-thing
+printf 'x = 1\n' > "$R/app/a.py"; commit_all "$R" 'KEY-1: Build thing'; packet "$R" "" "$(git -C "$R" rev-parse HEAD)"
+run_gate "$PUSH" "$R"; expect_deny 'a branch with no test commit after BASE is refused' 'touches a test path, so there is no checks commit to lock'
+R="$T/first-badbase"; new_repo "$R"; packet "$R" "" "" "0000000000000000000000000000000000000000"
+run_gate "$PUSH" "$R"; expect_deny 'a BASE line that is not a commit is refused' 'packet BASE'
+R="$T/first-nobase"; new_repo "$R"; gitq "$R" update-ref refs/remotes/origin/main main; packet_nobase "$R"
+run_gate "$PUSH" "$R"; expect_pass 'a packet without a BASE line falls back to the merge-base with origin/main'
+R="$T/first-noorigin"; new_repo "$R"; packet_nobase "$R"
+run_gate "$PUSH" "$R"; expect_deny 'a packet without a BASE line in a repo without origin/main is refused, naming BASE' 'no BASE line'
 
 echo "# config: .claude/harness.json in the target repo"
 R="$T/config"; new_repo "$R"
@@ -193,7 +202,7 @@ printf 'FOO=from-env-file\n# comment\n' > "$R/custom.env"
 config "$R" '{"suite":{"env_file":"custom.env","env":{"FOO":"ignored-default","BAR":"from-config"},"command":"printf \"%s %s\\n\" \"$FOO\" \"$BAR\""}}'
 run_gate "$PUSH" "$R"; expect_pass 'a configured env file and env defaults are exported to the suite'
 grep -q 'suite summary: from-env-file from-config' "$FAKE_CLAUDE_ARGS" && ok 'env_file wins over an env default, and an env default fills an unset variable' || { OUT="$(grep -o 'suite summary[^)]*' "$FAKE_CLAUDE_ARGS")"; bad 'env_file wins over an env default, and an env default fills an unset variable'; }
-config "$R" '{"kind":"other"}'; rm "$R/.claude/known-failures.txt"
+config "$R" '{"kind":"other"}'
 run_gate "$PUSH" "$R"; expect_pass 'kind other from the config skips the suite in a repo that looks like python'
 R="$T/config-paths"; new_repo "$R"; mkdir -p "$R/spec"; printf 'def test_s(): assert False\n' > "$R/spec/test_s.py"
 gitq "$R" add -A; gitq "$R" commit -qm 'KEY-1: Add checks for spec'; packet "$R"
@@ -203,6 +212,8 @@ gitq "$R" checkout -- spec; printf 'def test_new(): pass\n' > "$R/tests/test_new
 run_gate "$PUSH" "$R"; expect_pass 'a path outside the configured test paths is not locked'
 red_suite 'FAILED spec/test_s.py::test_s - boom'; run_gate "$PUSH" "$R"; expect_deny 'red ids are read under the configured test paths' 'spec/test_s.py::test_s'
 green_suite
+R="$T/config-base"; new_repo "$R"; gitq "$R" update-ref refs/remotes/origin/trunk main; packet_nobase "$R"
+config "$R" '{"base_ref":"origin/trunk"}'; run_gate "$PUSH" "$R"; expect_pass 'base_ref from the config is the fallback when the packet has no BASE line'
 
 echo "# portability: the gate runs on a PATH without coreutils timeout"
 MIN="$T/minbin"; mkdir -p "$MIN"
