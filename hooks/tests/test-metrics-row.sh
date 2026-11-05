@@ -25,7 +25,7 @@ printf '# Judge verdict for KEY-7-thing at x (t)\nUsage: input=10 cache_create=2
 
 echo "# metrics-row"
 ROW=$(python3 -I "$SCRIPT" "$R" KEY-7-thing --mutants 12/2 --qa 0 --session-tokens 999 --dry-run 2>"$T/stderr")
-field() { printf '%s' "$ROW" | python3 -I -c 'import csv,sys; cols="repo,ticket,branch,pr,pr_state,round_date,checks,rounds,correct_checks,mutants_run,mutants_survived,judge_fails,qa_bounces,human_approvals,human_review_comments,changes_requested,plan_approved_utc,packet_utc,pushed_utc,pr_opened_utc,pr_merged_utc,plan_to_push_min,open_to_merge_h,spec_started_utc,session_tokens,judge_tokens,interruptions,note".split(","); r=next(csv.reader(sys.stdin)); print(dict(zip(cols,r))[sys.argv[1]])' "$1"; }
+field() { printf '%s' "$ROW" | python3 -I -c 'import csv,sys; cols="repo,ticket,branch,pr,pr_state,round_date,checks,rounds,correct_checks,mutants_run,mutants_survived,judge_fails,qa_bounces,prod_incidents,human_approvals,human_review_comments,changes_requested,plan_approved_utc,packet_utc,pushed_utc,pr_opened_utc,pr_merged_utc,plan_to_push_min,open_to_merge_h,spec_started_utc,session_tokens,judge_tokens,interruptions,note".split(","); r=next(csv.reader(sys.stdin)); print(dict(zip(cols,r))[sys.argv[1]])' "$1"; }
 [ "$(field ticket)" = "KEY-7" ] && ok 'the ticket key is read from the branch name' || bad 'the ticket key is read from the branch name' "$ROW"
 [ "$(field checks)" = "3" ] && ok 'checks counts every test function the branch adds from BASE, Correct checks included' || bad 'checks counts every test function the branch adds from BASE, Correct checks included' "$ROW"
 [ "$(field correct_checks)" = "1" ] && ok 'correct_checks counts the Correct check commits' || bad 'correct_checks counts the Correct check commits' "$ROW"

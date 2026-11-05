@@ -291,8 +291,11 @@ config "$R" '{"budget":0}';  run_gate "$PUSH" "$R"; expect_deny 'a spent budget 
 config "$R" '{"budget":30}'; run_gate "$PUSH" "$R"; expect_deny 'a budget too short for the judge refuses before starting it' 'were left when the judge was due to start'
 config "$R" '{}'; FAKE_CLAUDE_MODE=PASS run_gate "$PUSH" "$R"; expect_pass 'with the default budget the same branch passes'
 BUDGET=$(grep -Eo "cfg '.budget' [0-9]+" "$HOOK" | grep -Eo '[0-9]+$')
-HOOK_TIMEOUT=$(jq -r '[.hooks.PreToolUse[]?.hooks[]? | select(.command | test("judge-gate")) | .timeout] | first // empty' "$HERE/../../settings.example.json" 2>/dev/null)
-[ -n "$BUDGET" ] && [ -n "$HOOK_TIMEOUT" ] && [ "$HOOK_TIMEOUT" -ge $((BUDGET * 2)) ] && ok "the hook timeout in settings.example.json ($HOOK_TIMEOUT s) is at least twice the default budget ($BUDGET s)" || { OUT="budget=$BUDGET hook timeout=$HOOK_TIMEOUT"; bad 'the hook timeout in settings.example.json is at least twice the default budget'; }
+# In this repo the example settings are checked; an installed copy of the suite (~/.claude/hooks/tests) has no
+# example file next to it and checks the live ~/.claude/settings.json instead, the one that actually runs the gate.
+SETTINGS="$HERE/../../settings.example.json"; [ -f "$SETTINGS" ] || SETTINGS="$HOME/.claude/settings.json"
+HOOK_TIMEOUT=$(jq -r '[.hooks.PreToolUse[]?.hooks[]? | select(.command | test("judge-gate")) | .timeout] | first // empty' "$SETTINGS" 2>/dev/null)
+[ -n "$BUDGET" ] && [ -n "$HOOK_TIMEOUT" ] && [ "$HOOK_TIMEOUT" -ge $((BUDGET * 2)) ] && ok "the hook timeout in $(basename "$SETTINGS") ($HOOK_TIMEOUT s) is at least twice the default budget ($BUDGET s)" || { OUT="budget=$BUDGET hook timeout=$HOOK_TIMEOUT settings=$SETTINGS"; bad 'the registered hook timeout is at least twice the default budget'; }
 
 echo "# a suite that never ran is not green"
 R="$T/norun"; new_repo "$R"

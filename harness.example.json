@@ -26,11 +26,28 @@
   },
   "ticket_key_regex": "\\b[A-Z]{2,}-\\d+",
   "worktree_links": ["CLAUDE.md", ".claude", "docs/agents", "TODOS.md", ".env", ".env.test", "node_modules"],
+  "worktree_venv_hint": "poetry install",
   "formatters": {
     "py": "poetry run black -q {file} && poetry run isort --profile black -q {file}",
     "ts": "npx prettier --loglevel warn --write {file} && npx eslint --fix {file}",
     "tsx": "npx prettier --loglevel warn --write {file} && npx eslint --fix {file}",
     "scss": "npx stylelint --fix {file}; npx prettier --loglevel warn --write {file}",
     "md": ""
+  },
+  "outcomes": {
+    "since": "",
+    "secrets_file": "",
+    "release_branch": "release/production",
+    "jira": {
+      "site": "example.atlassian.net",
+      "late_statuses": ["In Review", "Done"],
+      "early_statuses": ["In Progress", "Reopened"]
+    },
+    "sentry": {
+      "api": "https://sentry.io/api/0/",
+      "org": "example",
+      "environment": "production",
+      "projects": ["example-api", "example-api-worker"]
+    }
   }
 }

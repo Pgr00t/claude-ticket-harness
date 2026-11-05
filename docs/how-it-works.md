@@ -63,7 +63,7 @@ Every five rows the skill runs a review: repeats become one-sentence rules in th
 
 ## The metrics
 
-`hooks/metrics-row.py` appends one row per round-set to `.claude/metrics.csv` from the packet, the verdict file, git and `gh`. Three values are typed because nothing on disk knows them: mutants run and survived, QA bounces, session tokens. `docs/metrics.md` has the columns and what the first weeks of rows showed. The point of the file is the quality columns (human review comments, changes requested, QA bounces, judge FAILs), not the speed ones: they are the only way to tell whether the judge and the three reviewers earn their cost.
+`hooks/metrics-row.py` appends one row per round-set to `.claude/metrics.csv` from the packet, the verdict file, git and `gh`. Three values are typed because nothing on disk knows them: mutants run and survived, QA bounces, session tokens. Its `--outcomes` pass later fills the three defect-escape columns from the tracker's changelog, GitHub and Sentry, with the site's workflow names, Sentry org and release branch taken from the `outcomes` block of the config (`docs/metrics.md`, "Outcomes"). `docs/metrics.md` has the columns and what the first weeks of rows showed. The point of the file is the quality columns (human review comments, changes requested, QA bounces, judge FAILs), not the speed ones: they are the only way to tell whether the judge and the three reviewers earn their cost.
 
 ## The other three hooks
 
@@ -71,7 +71,7 @@ Every five rows the skill runs a review: repeats become one-sentence rules in th
 
 **`format-on-edit.sh`** (PostToolUse on Edit and Write) formats the one file that was touched with the tools of the repo that owns it, found by walking up to the nearest `pyproject.toml`, `package.json` or `.claude/harness.json`. Defaults: black then isort for `.py`; prettier then eslint for `.ts/.tsx/.js/.jsx`; stylelint then prettier for `.scss/.css`; prettier for `.json/.md` in a web repo. `formatters` in the config replaces any of these per extension. It never fails the edit.
 
-**`link-worktree-local-files.sh`** (SessionStart) makes parallel sessions in git worktrees possible when the harness files are untracked by design. In a linked worktree it symlinks each of `CLAUDE.md .claude docs/agents TODOS.md .env .env.test node_modules` (or `worktree_links` from the main checkout's config) that the main checkout has and the worktree lacks, links `.venv` to the main checkout's poetry environment, and appends bare-path excludes to the shared `.git/info/exclude` because a `dir/` ignore pattern does not match a symlink. It also warns when `node_modules` was installed for a different lockfile than the branch's.
+**`link-worktree-local-files.sh`** (SessionStart) makes parallel sessions in git worktrees possible when the harness files are untracked by design. In a linked worktree it symlinks each of `CLAUDE.md .claude docs/agents TODOS.md .env .env.test node_modules` (or `worktree_links` from the main checkout's config) that the main checkout has and the worktree lacks, links `.venv` to the main checkout's poetry environment (repointing a link it made earlier when that environment has moved, and naming `worktree_venv_hint` when there is none to share), and appends bare-path excludes to the shared `.git/info/exclude` because a `dir/` ignore pattern does not match a symlink. It also warns when `node_modules` was installed for a different lockfile than the branch's. A worktree that lives inside the main checkout's own `.claude/worktrees/` (where the Claude desktop app puts them) does not get `.claude` as one link, because that link would be a cycle (`.claude/worktrees/<name>/.claude/worktrees/...`) that black, isort and `find` walk until "File name too long"; there `.claude` is a real directory holding one link per entry of the main one, minus `worktrees/`, topped up on each run.
 
 ## Configuration
 
@@ -98,7 +98,18 @@ Everything site-specific lives in `.claude/harness.json` in the target repo. The
 | `judge.extra_allowed_tools` | `["Bash(poetry run pytest *)","Bash(npx vitest run *)","Bash(npx tsc *)"]`, added to Read, Grep, Glob and read-only git; `[]` removes them | gate |
 | `ticket_key_regex` | `\b[A-Z]{2,}-\d+` (Python syntax) | metrics-row.py, to read the ticket from the branch name |
 | `worktree_links` | `["CLAUDE.md",".claude","docs/agents","TODOS.md",".env",".env.test","node_modules"]` | link hook (read from the main checkout) |
+| `worktree_venv_hint` | `poetry install`; the one-time command the link hook names when a python main checkout has no venv to share | link hook (read from the main checkout) |
 | `formatters` | the defaults above, keyed by extension; `{file}` is the path, `""` disables | format hook |
+| `outcomes.since` | none, so every row; the earliest `round_date` the `--outcomes` pass rewrites (`--since` on the command line wins) | metrics-row.py `--outcomes` |
+| `outcomes.secrets_file` | none; a `KEY=value` file read for `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, `ATLASSIAN_SITE` and `SENTRY_AUTH_TOKEN` (the environment wins); never printed | metrics-row.py `--outcomes` |
+| `outcomes.release_branch` | none, so `prod_incidents` is never measured; the branch customers run (`release/production`), whose first first-parent commit containing the PR's merge commit dates the release | metrics-row.py `--outcomes` |
+| `outcomes.jira.site` | none (`ATLASSIAN_SITE` in the environment wins); without either, Jira is unreachable and `qa_bounces` is kept | metrics-row.py `--outcomes` |
+| `outcomes.jira.late_statuses` | `["In Review","Done"]`; a bounce leaves one of these for one of the early statuses after the PR opened | metrics-row.py `--outcomes` |
+| `outcomes.jira.early_statuses` | `["In Progress","Reopened"]` | metrics-row.py `--outcomes` |
+| `outcomes.sentry.api` | `https://sentry.io/api/0/`; a US or EU org gives its region host (`https://us.sentry.io/api/0/`) | metrics-row.py `--outcomes` |
+| `outcomes.sentry.org` | none, so `prod_incidents` is never measured | metrics-row.py `--outcomes` |
+| `outcomes.sentry.environment` | `production` | metrics-row.py `--outcomes` |
+| `outcomes.sentry.projects` | the repo's own name; list every project the repo's code reports to (an API and its worker) | metrics-row.py `--outcomes` |
 
 Two things stay hard-coded on purpose. The packet is always `.claude/judge/<branch>.md`, because the skill, the gate and the metrics helper all name it. The Correct-check title is `<anything>: Correct check <name>` so the key format never matters to the lock.
 

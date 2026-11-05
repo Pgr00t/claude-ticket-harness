@@ -8,10 +8,10 @@ It is five hooks, one skill, a CI job and a config file:
 - **`hooks/judge-status.sh`**: a PostToolUse hook that, after a successful feature-branch push, posts the judge's verdict for the pushed sha as a GitHub commit status (`judge-gate/verdict`), so that `ci/require-judge-verdict.yaml` can fail a pull request whose head was never judged.
 - **`hooks/format-on-edit.sh`**: a PostToolUse hook that formats each edited file with the tools of the repo that owns it.
 - **`hooks/link-worktree-local-files.sh`**: a SessionStart hook that symlinks the untracked harness files into a git worktree, so parallel sessions work.
-- **`hooks/metrics-row.py`**: one row per round in a CSV, from the packet, the verdict file, git and `gh`.
+- **`hooks/metrics-row.py`**: one row per round in a CSV, from the packet, the verdict file, git and `gh`; an `--outcomes` pass later fills the defect-escape columns from the tracker, GitHub and Sentry.
 - **`skills/ticket/SKILL.md`**: the `/ticket` procedure. Spec, plan, approval, then checks red and committed, build, verify against the running app, packet, push, PR, round log, and a review every five rows that rewrites the rules the session works by.
 
-`docs/how-it-works.md` has the whole mechanism. `hooks/tests/` runs the real scripts against throwaway repos with fake `poetry`, `claude` and `gh` binaries, 210 cases, about twenty seconds.
+`docs/how-it-works.md` has the whole mechanism. `hooks/tests/` runs the real scripts against throwaway repos with fake `poetry`, `claude` and `gh` binaries, 267 cases, about twenty seconds.
 
 ## The judge that rationalised
 
