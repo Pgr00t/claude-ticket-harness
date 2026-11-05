@@ -24,6 +24,17 @@
             "statusMessage": "Formatting the edited file with its repo's tools..."
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/judge-status.sh\"",
+            "timeout": 60,
+            "statusMessage": "Judge status: publishing the verdict as a commit status..."
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -33,7 +44,7 @@
           {
             "type": "command",
             "command": "bash \"$HOME/.claude/hooks/judge-gate.sh\"",
-            "timeout": 900,
+            "timeout": 7200,
             "statusMessage": "Judge gate: lock check, suite, then the judge..."
           }
         ]

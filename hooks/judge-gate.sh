@@ -7,6 +7,7 @@
 # .claude/harness.json in the repo the push targets; every key is optional and the defaults
 # below apply when the file or the key is absent. See docs/how-it-works.md, "Configuration".
 set -u
+GATE_START=$(date +%s)   # the wall-clock budget below counts from the first line, not from the first slow step
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 # Exact match on an actual push command, not the best-effort "if" filter.
@@ -47,9 +48,25 @@ cfg() { # $1 = jq path, $2 = default; scalars only
 cfg_lines() { # $1 = jq path to an array; one element per line, nothing when absent
   [ -n "$CONFIG" ] && jq -r "($1 // [])[]" "$CONFIG" 2>/dev/null
 }
-# `timeout` is GNU coreutils; a stock macOS does not have it. Run without a limit when absent.
+cfg_has() { # $1 = jq path; true when the key is present in the config, whatever its value (an explicit [] or "" counts)
+  [ -n "$CONFIG" ] && [ "$(jq -r "$1 != null" "$CONFIG" 2>/dev/null)" = true ]
+}
+# `timeout` is GNU coreutils; a stock macOS does not have it. Run without a limit when absent (exit 124 then
+# never happens, so a hung step is only caught by the budget checks between steps, never cut short).
 run_timed() { # $1 = seconds, $@ = command
   if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
+}
+
+# Time budget. Claude Code cancels a hook that outlives the timeout in settings.json and then runs the tool
+# anyway: a PreToolUse hook that times out fails open (docs/fail-open-on-timeout.md: the machine slept
+# mid-judge, the hook was cancelled when the timer ran out, and the push went through ungated). The gate
+# therefore keeps its own wall-clock deadline well inside that timeout and refuses the push when a step cannot
+# finish in time, which is the direction a gate should fail in. Config `budget` (default 1200 s) must stay well
+# under the hook timeout in settings.json (settings.example.json gives 7200 s); the test suite checks the ratio.
+GATE_BUDGET_S=$(cfg '.budget' 1200)
+remaining() { local r=$((GATE_START + GATE_BUDGET_S - $(date +%s))); [ "$r" -gt 0 ] && echo "$r" || echo 0; }
+out_of_time() { # $1 = what ran out of time, as a clause
+  deny "judge gate: $1, so the push is refused rather than let through: Claude Code cancels a hook that outlives its timeout and runs the tool anyway. If the machine slept during the gate, push again with it awake; otherwise find what is slow."
 }
 
 # Direct dependencies whose installed version (node_modules/.package-lock.json) differs
@@ -113,6 +130,32 @@ if [ "$(git rev-parse "$CHECKS_SHA^{commit}")" != "$FIRST" ]; then
   deny "judge gate: packet CHECKS_SHA ($(git rev-parse --short "$CHECKS_SHA")) is not the first commit after BASE that touches a test path; that is $(git rev-parse --short "$FIRST") '$(git log -1 --format=%s "$FIRST")'. The packet must name the first test-touching commit after BASE; a Correct check commit is never the CHECKS_SHA."
 fi
 
+# Deploy surface: a change that only works when the worker, the API and the migration roll in an order. The rule
+# exists because of one promotion: a PR moved work onto a background task, its scope reviewer noted the deploy
+# order, nobody acted on the note, the API was rolled before the worker and the old worker dropped the task. The
+# order now lives in the packet as a DEPLOY_AND_PROMOTION line the scope reviewer writes (/ticket step 6); a
+# surface change without it never reaches the judge, and the judge gets the file list so it can hold the line
+# against the diff (prompt step 7). Config `deploy.paths` replaces the pathspecs and `deploy.patterns` the regex
+# that marks a task or scheduled job (`git diff -G`, test paths excluded); `[]` and "" switch each half off.
+DEPLOY_PATHSPEC=()
+if cfg_has '.deploy.paths'; then
+  while IFS= read -r p; do [ -n "$p" ] && DEPLOY_PATHSPEC+=("$p"); done <<< "$(cfg_lines '.deploy.paths')"
+else
+  DEPLOY_PATHSPEC=('.github/workflows/' 'Dockerfile*' '*/Dockerfile*' 'docker/' 'alembic/' 'migrations/' 'Makefile')
+fi
+if cfg_has '.deploy.patterns'; then DEPLOY_TASK_RE=$(cfg '.deploy.patterns' ''); else DEPLOY_TASK_RE='@(celery_app|app)\.task|@shared_task|beat_schedule|add_periodic_task'; fi
+NOT_TESTS=(); for p in "${TEST_PATHSPEC[@]}"; do NOT_TESTS+=(":!$p"); done
+DEPLOY_SURFACE=""
+[ ${#DEPLOY_PATHSPEC[@]} -eq 0 ] || DEPLOY_SURFACE=$(git diff --name-only "$BASE" HEAD -- "${DEPLOY_PATHSPEC[@]}" 2>/dev/null)
+[ -z "$DEPLOY_TASK_RE" ] || DEPLOY_SURFACE=$(printf '%s\n%s\n' "$DEPLOY_SURFACE" "$(git diff --name-only -G "$DEPLOY_TASK_RE" "$BASE" HEAD -- . "${NOT_TESTS[@]}" 2>/dev/null)")
+DEPLOY_SURFACE=$(printf '%s\n' "$DEPLOY_SURFACE" | grep -v '^$' | sort -u)
+DEPLOY_LINE=$(grep -E -m1 '^DEPLOY_AND_PROMOTION:' "$PACKET" | sed -E 's/^DEPLOY_AND_PROMOTION:[[:space:]]*//')
+DEPLOY_WORDS=$(printf '%s' "$DEPLOY_LINE" | wc -w | tr -d ' ')
+if [ -n "$DEPLOY_SURFACE" ] && [ "$DEPLOY_WORDS" -lt 10 ]; then
+  deny "judge gate: the diff $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) touches a deployable surface (a background task or scheduled job, a workflow, a Dockerfile, a migration, the Makefile) but the packet has no DEPLOY_AND_PROMOTION: line with at least ten words after the label (found $DEPLOY_WORDS). The scope reviewer writes it in /ticket step 6: what is deployed, in what order, on which release branch, and what breaks if the order is wrong; or 'none, no deploy-order dependency' with the reason. Touched:"$'\n'"$DEPLOY_SURFACE"
+fi
+DEPLOY_SURFACE_TEXT=${DEPLOY_SURFACE:-none}
+
 # Mechanical lock: tests/ untouched since the checks commit, except "Correct check" commits.
 DIRTY=$(git status --porcelain -- "${TEST_PATHSPEC[@]}" | head -5)
 [ -z "$DIRTY" ] || deny "judge gate: uncommitted changes to test files (checks are locked after $CHECKS_SHA):"$'\n'"$DIRTY"
@@ -144,9 +187,13 @@ if [ "$KIND" != other ]; then
     printf '%s' "$k" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || continue
     eval "[ -n \"\${$k+set}\" ] || export $k=\"\$v\""
   done <<< "$(cfg_lines '(.suite.env // {}) | to_entries | map("\(.key)=\(.value)")')"
+  # Each step gets the smaller of its own timeout and what is left of the budget; exit 124 is the timeout firing.
   if [ "$KIND" = python ]; then
     SUITE_CMD=$(cfg '.suite.command' 'poetry run pytest tests/unit -q --continue-on-collection-errors -p no:cacheprovider')
-    RAW=$(run_timed "$SUITE_TIMEOUT" bash -c "$SUITE_CMD" 2>&1)
+    R=$(remaining); [ "$R" -gt 0 ] || out_of_time "the gate's $GATE_BUDGET_S s budget was spent before the unit suite started"
+    T=$(( SUITE_TIMEOUT < R ? SUITE_TIMEOUT : R ))
+    RAW=$(run_timed "$T" bash -c "$SUITE_CMD" 2>&1); SUITE_RC=$?
+    [ "$SUITE_RC" -eq 124 ] && out_of_time "the unit suite did not finish within $T s"
     SUITE=$(printf '%s\n' "$RAW" | tail -1)
     # Red lines are the summary's "FAILED <id>" / "ERROR <path>" lines whose id starts under a test path,
     # so a test that prints the word FAILED cannot invent an id.
@@ -157,8 +204,15 @@ if [ "$KIND" != other ]; then
     [ -z "$STALE" ] || deny "judge gate: node_modules does not match package-lock.json, so tsc and vitest results would be meaningless. Run 'npm ci' on this lockfile, then push again. Differences:"$'\n'"$STALE"
     TYPECHECK_CMD=$(cfg '.suite.typecheck_command' 'npx tsc --noEmit')
     SUITE_CMD=$(cfg '.suite.command' 'npx vitest run')
-    TSC=$(run_timed "$SUITE_TIMEOUT" bash -c "$TYPECHECK_CMD" 2>&1 | grep -E 'error TS' || true)
-    RAW=$(run_timed "$SUITE_TIMEOUT" bash -c "$SUITE_CMD" 2>&1)
+    R=$(remaining); [ "$R" -gt 0 ] || out_of_time "the gate's $GATE_BUDGET_S s budget was spent before the type check started"
+    T=$(( SUITE_TIMEOUT < R ? SUITE_TIMEOUT : R ))
+    TSC_RAW=$(run_timed "$T" bash -c "$TYPECHECK_CMD" 2>&1); TSC_RC=$?
+    [ "$TSC_RC" -eq 124 ] && out_of_time "the type check did not finish within $T s"
+    TSC=$(printf '%s\n' "$TSC_RAW" | grep -E 'error TS' || true)
+    R=$(remaining); [ "$R" -gt 0 ] || out_of_time "the gate's $GATE_BUDGET_S s budget was spent before the test suite started"
+    T=$(( SUITE_TIMEOUT < R ? SUITE_TIMEOUT : R ))
+    RAW=$(run_timed "$T" bash -c "$SUITE_CMD" 2>&1); SUITE_RC=$?
+    [ "$SUITE_RC" -eq 124 ] && out_of_time "the test suite did not finish within $T s"
     SUITE="tsc errors: $(printf '%s' "$TSC" | grep -c . ); vitest: $(printf '%s\n' "$RAW" | grep -E '^ +Tests ' | sed 's/^ *//')"
     RED=$(printf '%s\n%s\n' "$(printf '%s\n' "$RAW" | grep -E '^ FAIL ' | sed 's/^ *//')" "$TSC" | grep -v '^$' || true)
   fi
@@ -172,6 +226,13 @@ if [ "$KIND" != other ]; then
     fi
     deny "judge gate: the suite is not green (suite: $SUITE). There is no accepted-failures list: every red test below is this branch's to fix; one that is already red on the base branch gets its own PR from the base branch first, then rebase:"$'\n'"$IDS"
   fi
+  # A suite that never ran (the runner missing, a broken environment, nothing collected) prints no red lines
+  # at all, so the exit status is what proves it ran green. A timeout (124) was handled above.
+  if [ "$KIND" = python ]; then
+    [ "$SUITE_RC" -eq 0 ] || deny "judge gate: the unit suite did not run to a green finish (pytest exit $SUITE_RC), so there is no evidence it is green. Last lines:"$'\n'"$(printf '%s\n' "$RAW" | tail -5)"
+  else
+    [ "$TSC_RC" -eq 0 ] && [ "$SUITE_RC" -eq 0 ] || deny "judge gate: the checks did not run to a green finish (tsc exit $TSC_RC, vitest exit $SUITE_RC), so there is no evidence they are green. Last lines:"$'\n'"$(printf '%s\n%s\n' "$TSC_RAW" "$RAW" | tail -8)"
+  fi
 fi
 
 DIFF_STAT=$(git diff --stat "$CHECKS_SHA" HEAD | tail -30)
@@ -181,18 +242,19 @@ You are the judge for branch $BRANCH, about to be pushed. You decide whether it 
 
 Read, in this order:
 1. CLAUDE.md (Conventions and How to work).
-2. The judge packet at $PACKET: the five-line spec (Goal, Acceptance, Out of scope, Verify, Files), the Verify command and its output, and the round count. Trust the packet for the spec text only.
+2. The judge packet at $PACKET: the five-line spec (Goal, Acceptance, Out of scope, Verify, Files), the DEPLOY_AND_PROMOTION line, the Verify command and its output, and the round count. Trust the packet for the spec text only.
 3. The checks: run \`git show $CHECKS_SHA --stat\` and read every test file it adds or changes. Each test must assert the behaviour in the Acceptance line. A test that would pass without the feature (asserts on a mock it set itself, asserts only that something exists or returns anything, never calls the code under test) is vacuous: FAIL, naming the test.
 4. The code: run \`git diff $CHECKS_SHA HEAD -- . $DIFF_EXCLUDE\` and read it. Every change must serve the Goal line. Anything the Out of scope line excludes is a FAIL.
 5. Wiring: for each new function, method or class in that diff, find a caller in the diff or in existing code with Grep. New code with no caller is a FAIL unless the spec says it is for a later ticket.
 6. Verify evidence: the packet must show the Verify command and output demonstrating the Acceptance line. Missing or unconvincing output is a FAIL.
+7. Deploy and promotion: the DEPLOY_AND_PROMOTION line of the packet must match the diff. If the diff adds or changes a background task or scheduled job, a workflow, a Dockerfile or a migration, the line must state the order in which the services (worker, API, migration) are rolled and on which release branch, and what breaks if the order is wrong; a line that says none while the diff touches one of those is a FAIL; a scope-reviewer note about deploy order (in the packet or the PR body) that the line does not carry is a FAIL. Files on the deploy surface in $BASE..HEAD, found mechanically (none means the diff touches no such path and adds no task or scheduled job): $DEPLOY_SURFACE_TEXT
 
 The test-file lock (nothing in the test paths changed after the checks commit except Correct-check commits limited to the test files of this ticket) and the unit suite (every test green) were both checked mechanically before you were called (suite summary: $SUITE). Do not re-judge either; do not fail step 1 on the lock, and do not explain away any number. More generally: never rationalise a discrepancy. If the evidence for a step is missing or you could not check it, that step is a FAIL, not a PASS with a caveat.
 
 Diff stat since the checks commit:
 $DIFF_STAT
 
-Answer with a short report: one line per step 1 to 6, PASS or FAIL with file:line or test name for every FAIL, so the builder can act without guessing. The final line must be exactly VERDICT: PASS or VERDICT: FAIL.
+Answer with a short report: one line per step 1 to 7, PASS or FAIL with file:line or test name for every FAIL, so the builder can act without guessing. The final line must be exactly VERDICT: PASS or VERDICT: FAIL.
 PEOF
 )
 
@@ -204,10 +266,15 @@ ALLOWED="Read,Grep,Glob,Bash(git diff *),Bash(git show *),Bash(git log *),Bash(g
 EXTRA=$(cfg_lines '.judge.extra_allowed_tools' | paste -sd, -)
 [ -n "$EXTRA" ] || [ -n "$(cfg '.judge.extra_allowed_tools' '')" ] || EXTRA="Bash(poetry run pytest *),Bash(npx vitest run *),Bash(npx tsc *)"
 [ -z "$EXTRA" ] || ALLOWED="$ALLOWED,$EXTRA"
+# The judge is not started with less than a minute of budget left; it never gets more than what remains.
+R=$(remaining); [ "$R" -ge 60 ] || out_of_time "only $R s of the gate's $GATE_BUDGET_S s budget were left when the judge was due to start"
+T=$(( JUDGE_TIMEOUT < R ? JUDGE_TIMEOUT : R ))
 # The two variables mark a nested Claude Code session; the judge must start as a plain CLI run.
-OUT=$( (unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; run_timed "$JUDGE_TIMEOUT" claude -p "$PROMPT" --model "$JUDGE_MODEL" --output-format json \
+OUT=$( (unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; run_timed "$T" claude -p "$PROMPT" --model "$JUDGE_MODEL" --output-format json \
   --allowedTools "$ALLOWED" \
-  --disallowedTools "Edit,Write,NotebookEdit,Bash(git push *),Bash(git commit *),Bash(git add *),Bash(git checkout *),Bash(git reset *),Bash(git rebase *),Bash(git merge *),Bash(rm *)") 2>&1)
+  --disallowedTools "Edit,Write,NotebookEdit,Bash(git push *),Bash(git commit *),Bash(git add *),Bash(git checkout *),Bash(git reset *),Bash(git rebase *),Bash(git merge *),Bash(rm *)") 2>&1); JUDGE_RC=$?
+[ "$JUDGE_RC" -eq 124 ] && out_of_time "the judge did not finish within $T s"
+[ "$(remaining)" -gt 0 ] || out_of_time "the gate ran past its $GATE_BUDGET_S s budget while the judge ran"
 printf '%s' "$OUT" | grep -q 'Not logged in' && deny "judge gate: the claude CLI used for the headless judge is not logged in. Run 'claude login' once in a terminal (same account as the app), then push again."
 REPORT=$(printf '%s' "$OUT" | jq -r '.result // empty' 2>/dev/null)
 [ -n "$REPORT" ] || deny "judge gate: the judge did not return a report. Raw output (first lines):"$'\n'"$(printf '%s' "$OUT" | head -c 1500)"

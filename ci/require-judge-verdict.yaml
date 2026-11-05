@@ -1,0 +1,121 @@
+# Require a judge verdict on every gated feature-branch pull request.
+#
+# Every feature-branch push by the accounts in GATED_AUTHORS is meant to go
+# through the local judge gate (hooks/judge-gate.sh). After a successful push
+# hooks/judge-status.sh posts a commit status on the pushed head sha with
+# context `judge-gate/verdict`: `success` with "VERDICT: PASS <utc>" when a
+# PASS verdict exists for that sha, `failure` with "no judge verdict for this
+# sha" otherwise. A PreToolUse hook that outlives its timeout fails open
+# (docs/fail-open-on-timeout.md), so a push can go out ungated and nothing on
+# the machine notices. This job makes the pull request red when its head sha
+# carries no `success` status in that context.
+#
+# Exempt, so the job passes without asking GitHub: pull requests opened by
+# anyone not in GATED_AUTHORS (other developers do not run the gate, and the
+# job must stay safe to require), draft pull requests (checked again when
+# marked ready for review), and head branches starting with `release/`
+# (promotions) or `dependabot/` (bot updates), which no judge gate ever sees.
+# Add your own always-exempt branch prefixes to the first `case` below.
+#
+# The combined-status endpoint returns the latest status per context, so one
+# call answers the question. The head sha is the pull request's own head, not
+# `github.sha` (the merge commit), because the verdict is posted on the pushed
+# head. The hook posts after `git push` returns while a `synchronize` run
+# starts the moment the push lands, so an absent or pending context is asked
+# again for up to WAIT_SECONDS before the job fails; `failure` and `error`
+# fail at once. Nothing re-runs the job when a status arrives later: re-post
+# the verdict (one run of hooks/judge-status.sh), then re-run the job.
+#
+# To install: copy to .github/workflows/ in the target repo, put the gated
+# GitHub logins in GATED_AUTHORS (space-separated), set `status.context` in
+# .claude/harness.json if you changed the context, then list the check
+# `require-judge-verdict` as required in the branch protection of `main`. The
+# job sets no display name, so the check GitHub lists is the job id.
+name: Require judge verdict
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  statuses: read
+  pull-requests: read
+
+jobs:
+  require-judge-verdict:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a judge-gate/verdict success status on the head sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          GATED_AUTHORS: your-github-login
+          STATUS_CONTEXT: judge-gate/verdict
+          WAIT_SECONDS: "90"
+        run: |
+          case "$HEAD_REF" in
+            release/*|dependabot/*)
+              echo "::notice::$HEAD_REF is exempt from the judge gate (release or dependabot branch); nothing to check."
+              exit 0
+              ;;
+          esac
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "::notice::Draft pull request; the judge verdict is checked when it is marked ready for review."
+            exit 0
+          fi
+          case " $GATED_AUTHORS " in
+            *" $PR_AUTHOR "*) ;;
+            *)
+              if [ -n "$PR_AUTHOR" ]; then
+                echo "::notice::Pull request by $PR_AUTHOR; the judge gate runs only for $GATED_AUTHORS, nothing to check."
+                exit 0
+              fi
+              ;;
+          esac
+          fix="Run the push through the judge gate, or re-post the verdict with hooks/judge-status.sh, then re-run this job."
+          started=$SECONDS
+          while :; do
+            combined=$(gh api "repos/$REPOSITORY/commits/$HEAD_SHA/status?per_page=100") || {
+              echo "::error::Could not read the commit statuses of $HEAD_SHA from GitHub."
+              exit 1
+            }
+            verdict=$(printf '%s' "$combined" | jq -r --arg ctx "$STATUS_CONTEXT" '
+              [.statuses[] | select(.context == $ctx)][0]
+              | if . == null then "absent" else "\(.state)\t\(.description)" end
+            ')
+            state=${verdict%%$'\t'*}
+            description=${verdict#*$'\t'}
+            case "$state" in
+              success)
+                echo "$STATUS_CONTEXT on $HEAD_SHA is success: $description"
+                exit 0
+                ;;
+              absent|pending)
+                if [ $((SECONDS - started)) -lt "$WAIT_SECONDS" ]; then
+                  echo "$STATUS_CONTEXT on $HEAD_SHA is $state; the hook posts it after the push returns, asking again in 5 s."
+                  sleep 5
+                  continue
+                fi
+                ;;
+            esac
+            break
+          done
+          case "$state" in
+            absent)
+              echo "::error::No $STATUS_CONTEXT status on $HEAD_SHA. $fix"
+              ;;
+            *)
+              echo "::error::$STATUS_CONTEXT on $HEAD_SHA is $state ($description), not success. $fix"
+              ;;
+          esac
+          exit 1

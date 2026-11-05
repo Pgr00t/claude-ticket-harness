@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Tests for hooks/judge-gate.sh: the command filter, the target-repo rules, the packet and lock checks,
-# the checks-commit rule, the green-suite requirement, the config file, and the judge round trip. Everything runs
-# against throwaway git repos under a temp dir, with fake `poetry` and `claude` binaries first on PATH,
-# so no real suite runs and no real judge is started. Nothing outside the temp dir is touched.
+# the checks-commit rule, the deploy-surface rule, the green-suite requirement, the time budget, the config
+# file, and the judge round trip. Everything runs against throwaway git repos under a temp dir, with fake
+# `poetry` and `claude` binaries first on PATH, so no real suite runs and no real judge is started. Nothing
+# outside the temp dir is touched.
 #
 #   bash hooks/tests/test-judge-gate.sh                    # exit 0 when every case passes
 #   HOOK=/path/to/judge-gate.sh bash .../test-judge-gate.sh  # test another copy of the script
@@ -16,8 +17,11 @@ trap 'rm -rf "$T"' EXIT
 FAKEBIN="$T/bin"; mkdir -p "$FAKEBIN"
 cat > "$FAKEBIN/poetry" <<'X'
 #!/usr/bin/env bash
-# Stands in for `poetry run pytest ...`: prints the canned pytest output the test chose.
+# Stands in for `poetry run pytest ...`: prints the canned pytest output the test chose, after an optional
+# delay (a slow suite), and exits with FAKE_PYTEST_EXIT (a suite that never ran, such as a missing runner).
+[ -z "${FAKE_PYTEST_SLEEP:-}" ] || sleep "$FAKE_PYTEST_SLEEP"
 cat "$FAKE_PYTEST_OUT"
+exit "${FAKE_PYTEST_EXIT:-0}"
 X
 cat > "$FAKEBIN/claude" <<'X'
 #!/usr/bin/env bash
@@ -26,6 +30,7 @@ printf '%s\n' "$*" > "$FAKE_CLAUDE_ARGS"
 case "${FAKE_CLAUDE_MODE:-PASS}" in
   notloggedin) echo "Not logged in · Please run /login"; exit 1;;
   empty) echo '{"result":""}'; exit 0;;
+  slow) sleep 3; jq -cn '{result:"VERDICT: PASS"}';;
   *) jq -cn --arg r "1. CLAUDE.md PASS"$'\n'"VERDICT: ${FAKE_CLAUDE_MODE:-PASS}" '{result:$r, usage:{input_tokens:1200, cache_creation_input_tokens:300, cache_read_input_tokens:4500, output_tokens:250}, total_cost_usd:0.0421, duration_ms:61400}';;
 esac
 X
@@ -65,6 +70,10 @@ packet_nobase() { # like packet, but without a BASE line, so the gate must fall 
 }
 commit_all() { gitq "$1" add -A; gitq "$1" commit -qm "$2"; }
 config() { printf '%s\n' "$2" > "$1/.claude/harness.json"; }  # $1 = repo, $2 = JSON text
+deploy_line() { printf 'DEPLOY_AND_PROMOTION: %s\n' "$2" >> "$1/.claude/judge/KEY-1-thing.md"; } # $1 = repo, $2 = text after the label
+surface_commit() { # $1 = repo, $2 = path to add on the deploy surface, $3 = its content; commits it and rewrites the packet
+  mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "$3" > "$1/$2"; commit_all "$1" "KEY-1: Build $2"; packet "$1"
+}
 
 # --- runner and assertions ---------------------------------------------------------------------
 OUT=""; PASS=0; FAIL=0
@@ -74,6 +83,7 @@ run_gate() { # $1 = command text, $2 = cwd
 }
 ok() { PASS=$((PASS+1)); printf 'ok    %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL  %s\n      got: %s\n' "$1" "$(printf '%s' "$OUT" | head -c 400)"; }
+skip() { SKIP=$((SKIP+1)); printf 'skip  %s\n' "$1"; }; SKIP=0
 expect_allow() { [ "$OUT" = "{}" ] && ok "$1" || bad "$1 (expected {})"; }
 expect_pass() {
   printf '%s' "$OUT" | jq -e '.systemMessage | test("Judge PASS")' >/dev/null 2>&1 && ok "$1" || bad "$1 (expected Judge PASS)"
@@ -182,6 +192,38 @@ run_gate "$PUSH" "$R"; expect_pass 'a packet without a BASE line falls back to t
 R="$T/first-noorigin"; new_repo "$R"; packet_nobase "$R"
 run_gate "$PUSH" "$R"; expect_deny 'a packet without a BASE line in a repo without origin/main is refused, naming BASE' 'no BASE line'
 
+echo "# deploy surface: a change needing a deploy order must carry a DEPLOY_AND_PROMOTION line of ten or more words"
+TEN='worker before API on release/qa, else the old worker drops the task'
+R="$T/deploy-workflow"; new_repo "$R"; surface_commit "$R" .github/workflows/cd.yml 'on: push'
+run_gate "$PUSH" "$R"; expect_deny 'a .github/workflows/ change with no deploy line is refused, naming the path' '.github/workflows/cd.yml'
+printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q 'no DEPLOY_AND_PROMOTION: line with at least ten words' && ok 'and the missing line is named' || bad 'and the missing line is named'
+deploy_line "$R" "$TEN"; run_gate "$PUSH" "$R"; expect_pass 'the same diff with a ten-word deploy line reaches the judge'
+grep -q '7. Deploy and promotion: the DEPLOY_AND_PROMOTION line of the packet must match the diff' "$FAKE_CLAUDE_ARGS" && grep -q 'a line that says none while the diff touches one of those is a FAIL' "$FAKE_CLAUDE_ARGS" && ok 'the judge prompt carries the deploy-and-promotion step' || { OUT="$(grep -o 'Deploy and promotion[^.]*' "$FAKE_CLAUDE_ARGS" | head -c 300)"; bad 'the judge prompt carries the deploy-and-promotion step'; }
+grep -q 'found mechanically (none means the diff touches no such path and adds no task or scheduled job): .github/workflows/cd.yml' "$FAKE_CLAUDE_ARGS" && ok 'and lists the touched surface paths' || { OUT="$(grep -o 'found mechanically.*' "$FAKE_CLAUDE_ARGS" | head -c 300)"; bad 'and lists the touched surface paths'; }
+R="$T/deploy-api"; new_repo "$R"; surface_commit "$R" app/api/routes.py 'def route(): pass'
+run_gate "$PUSH" "$R"; expect_pass 'a diff touching only app/api/ needs no deploy line'
+grep -q 'adds no task or scheduled job): none$' "$FAKE_CLAUDE_ARGS" && ok 'and the judge is told the surface is none' || { OUT="$(grep -o 'found mechanically.*' "$FAKE_CLAUDE_ARGS" | head -c 300)"; bad 'and the judge is told the surface is none'; }
+R="$T/deploy-alembic"; new_repo "$R"; surface_commit "$R" alembic/versions/0001_add_col.py 'def upgrade(): pass'; deploy_line "$R" 'none, no dependency'
+run_gate "$PUSH" "$R"; expect_deny 'an alembic/ change with a three-word deploy line is refused' 'alembic/versions/0001_add_col.py'
+printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q '(found 3)' && ok 'and the word count is reported' || bad 'and the word count is reported'
+R="$T/deploy-decorator"; new_repo "$R"; surface_commit "$R" app/services/jobs.py $'@shared_task\ndef nightly(): pass'
+run_gate "$PUSH" "$R"; expect_deny 'a task decorator added outside the surface paths is a deploy surface too' 'app/services/jobs.py'
+R="$T/deploy-dockerfile"; new_repo "$R"; surface_commit "$R" Dockerfile 'FROM python:3.11'
+run_gate "$PUSH" "$R"; expect_deny 'a Dockerfile change with no deploy line is refused' 'Dockerfile'
+R="$T/deploy-makefile"; new_repo "$R"; surface_commit "$R" Makefile 'start:'
+run_gate "$PUSH" "$R"; expect_deny 'a Makefile change with no deploy line is refused' 'Makefile'
+R="$T/deploy-testword"; new_repo "$R"
+printf 'def test_new(): assert "beat_schedule" == "beat_schedule"\n' > "$R/tests/test_new.py"; commit_all "$R" 'KEY-1: Correct check test_new'; packet "$R"
+run_gate "$PUSH" "$R"; expect_pass 'the task-pattern grep ignores test files, so a test mentioning beat_schedule needs no deploy line'
+R="$T/deploy-config"; new_repo "$R"; surface_commit "$R" app/queue/tasks.py 'def job(): pass'
+run_gate "$PUSH" "$R"; expect_pass 'a path outside the default surface needs no deploy line'
+config "$R" '{"deploy":{"paths":["app/queue/"]}}'
+run_gate "$PUSH" "$R"; expect_deny 'deploy.paths from the config replaces the surface paths' 'app/queue/tasks.py'
+config "$R" '{"deploy":{"paths":["app/queue/"],"patterns":"def job"}}'; surface_commit "$R" app/other.py 'def job(): pass'
+run_gate "$PUSH" "$R"; expect_deny 'deploy.patterns from the config replaces the task regex' 'app/other.py'
+R="$T/deploy-off"; new_repo "$R"; surface_commit "$R" Dockerfile 'FROM python:3.11'; config "$R" '{"deploy":{"paths":[],"patterns":""}}'
+run_gate "$PUSH" "$R"; expect_pass 'an empty deploy.paths and an empty deploy.patterns switch the rule off'
+
 echo "# config: .claude/harness.json in the target repo"
 R="$T/config"; new_repo "$R"
 config "$R" '{not json';                          run_gate "$PUSH" "$R"; expect_deny 'an unreadable config file is refused, not ignored' 'not valid JSON'
@@ -236,6 +278,30 @@ V="$R/.claude/judge/KEY-1-thing.verdict.md"
 grep -q '^Usage: input=1200 cache_create=300 cache_read=4500 output=250 cost_usd=0.0421 duration_s=61$' "$V" && ok 'each section records the judge usage and cost from the CLI JSON' || { OUT="$(grep -n Usage "$V" 2>&1)"; bad 'each section records the judge usage and cost from the CLI JSON'; }
 run_gate "git -C $R push -u origin KEY-1-thing" "$T"; expect_pass 'the target repo is taken from git -C'
 
+echo "# time budget: the gate refuses when it cannot finish inside its own budget, never outliving the hook timeout"
+R="$T/budget"; new_repo "$R"
+if command -v timeout >/dev/null 2>&1; then
+  config "$R" '{"suite":{"timeout":1}}'; FAKE_PYTEST_SLEEP=2 run_gate "$PUSH" "$R"; expect_deny 'a suite that outruns its cap is refused, not waited for' 'the unit suite did not finish within 1 s'
+  config "$R" '{"judge":{"timeout":1}}'; FAKE_CLAUDE_MODE=slow run_gate "$PUSH" "$R"; expect_deny 'a judge that outruns its cap is refused, not waited for' 'the judge did not finish within 1 s'
+else
+  skip 'a suite that outruns its cap is refused (needs coreutils timeout)'
+  skip 'a judge that outruns its cap is refused (needs coreutils timeout)'
+fi
+config "$R" '{"budget":0}';  run_gate "$PUSH" "$R"; expect_deny 'a spent budget refuses before the suite starts' 'budget was spent before the unit suite'
+config "$R" '{"budget":30}'; run_gate "$PUSH" "$R"; expect_deny 'a budget too short for the judge refuses before starting it' 'were left when the judge was due to start'
+config "$R" '{}'; FAKE_CLAUDE_MODE=PASS run_gate "$PUSH" "$R"; expect_pass 'with the default budget the same branch passes'
+BUDGET=$(grep -Eo "cfg '.budget' [0-9]+" "$HOOK" | grep -Eo '[0-9]+$')
+HOOK_TIMEOUT=$(jq -r '[.hooks.PreToolUse[]?.hooks[]? | select(.command | test("judge-gate")) | .timeout] | first // empty' "$HERE/../../settings.example.json" 2>/dev/null)
+[ -n "$BUDGET" ] && [ -n "$HOOK_TIMEOUT" ] && [ "$HOOK_TIMEOUT" -ge $((BUDGET * 2)) ] && ok "the hook timeout in settings.example.json ($HOOK_TIMEOUT s) is at least twice the default budget ($BUDGET s)" || { OUT="budget=$BUDGET hook timeout=$HOOK_TIMEOUT"; bad 'the hook timeout in settings.example.json is at least twice the default budget'; }
+
+echo "# a suite that never ran is not green"
+R="$T/norun"; new_repo "$R"
+printf 'No preset version installed for command poetry\n' > "$FAKE_PYTEST_OUT"
+FAKE_PYTEST_EXIT=126 run_gate "$PUSH" "$R"; expect_deny 'a suite command that fails to start is refused with its exit status' 'did not run to a green finish (pytest exit 126)'
+printf 'no tests ran in 0.01s\n' > "$FAKE_PYTEST_OUT"
+FAKE_PYTEST_EXIT=5 run_gate "$PUSH" "$R";   expect_deny 'a suite that collected nothing is refused' 'pytest exit 5'
+green_suite; run_gate "$PUSH" "$R";          expect_pass 'a suite that exits 0 with a passed summary reaches the judge'
+
 echo
-printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+if [ "$SKIP" -gt 0 ]; then printf '%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"; else printf '%d passed, %d failed\n' "$PASS" "$FAIL"; fi
 [ "$FAIL" -eq 0 ]

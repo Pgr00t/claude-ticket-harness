@@ -96,7 +96,7 @@ Done when: every check from step 4 is green and the refactor pass has run.
 2. The "Verify" line from the spec, against the running app.
 3. The tests for the touched area, then the full unit suite.
 4. The format and lint checks CI runs (`CLAUDE.md` names the commands).
-5. Review fan-out. Spawn three review subagents in parallel on `git diff $CHECKS_SHA HEAD`, each given the spec and one question only: does the code do what the Goal line says and nothing else; do the checks actually test the Acceptance line or could they pass vacuously; is every new function reachable from an endpoint, task or existing caller. The checks reviewer should mutate the build (flip a comparison, ignore an argument, drop a branch) and name every mutant the checks let live. Each returns findings with file and line. Fix the real ones, note the rest in the PR body under Out of scope, and run steps 1 to 4 again if anything changed.
+5. Review fan-out. Spawn three review subagents in parallel on `git diff $CHECKS_SHA HEAD`, each given the spec and one question only: does the code do what the Goal line says and nothing else; do the checks actually test the Acceptance line or could they pass vacuously; is every new function reachable from an endpoint, task or existing caller. The checks reviewer should mutate the build (flip a comparison, ignore an argument, drop a branch) and name every mutant the checks let live. The scope reviewer has one required output besides its findings, copied verbatim into the packet in step 7: `Deploy and promotion: <what must be deployed, in what order, on which release branch, and what breaks if the order is wrong; or 'none, no deploy-order dependency' with the reason>`. A new or changed background task, scheduled job, workflow, Dockerfile or migration always has an order (the worker must carry a task before the API enqueues it, or the old worker drops it on the promotion; a migration runs before the code that reads the column); `CLAUDE.md`'s deploy paths name the release branches. Each returns findings with file and line. Fix the real ones, note the rest in the PR body under Out of scope, and run steps 1 to 4 again if anything changed.
 
 Every failure is yours: fix it before moving on. A test that is already red on the base branch gets its own PR from the base branch first (the gate accepts no red test). Record the counts you saw; they go in the PR body.
 
@@ -106,7 +106,7 @@ Done when: the gate is clean, the Verify line passed, the suite is green, format
 
 ## 7. Open the PR
 
-Write the judge packet first, at `.claude/judge/<branch>.md`, in exactly this shape (the gate script parses the `CHECKS_SHA`, `HEAD` and `BASE` lines, so keep them on their own lines near the top):
+Write the judge packet first, at `.claude/judge/<branch>.md`, in exactly this shape (the gate script parses the `CHECKS_SHA`, `HEAD`, `BASE` and `DEPLOY_AND_PROMOTION` lines, so keep them on their own lines near the top):
 
 ```
 # Judge packet: <branch>
@@ -116,6 +116,7 @@ BASE: <origin/main sha the branch started from>
 ROUNDS: <n>
 SPEC_STARTED: <the utc minute from step 2>
 INTERRUPTIONS: <user messages that changed scope, approach or a check since plan approval; 0 if none>
+DEPLOY_AND_PROMOTION: <the scope reviewer's Deploy and promotion text from step 6, verbatim, on this one line>
 
 ## Spec
 Goal: ...  Acceptance: ...  Out of scope: ...  Verify: ...  Files: ...   (the five lines from step 2)
@@ -129,7 +130,7 @@ Goal: ...  Acceptance: ...  Out of scope: ...  Verify: ...  Files: ...   (the fi
 
 `CHECKS_SHA` must be the first commit after `BASE` that touches `<tests>`, which the gate computes from git itself; a Correct check commit is never the `CHECKS_SHA`.
 
-The push is gated by `~/.claude/hooks/judge-gate.sh`, a PreToolUse hook on every real push. It refuses the push, with the reason returned to you, when any of these fail: no packet; packet `HEAD` is not the current HEAD; `CHECKS_SHA` is not the first commit after `BASE` that touches `<tests>`; uncommitted changes in `<tests>`; a commit after `CHECKS_SHA` touching `<tests>` whose title is not `<KEY>: Correct check ...`; a Correct check commit touching a test file the checks commit did not; any red test (there is no accepted-failures list). It then runs the suite itself (the command in `.claude/harness.json`) and hands the summary, the diff stat and the packet to a headless judge, which reads the checks, the diff and the Verify output and ends with `VERDICT: PASS` or `VERDICT: FAIL`. The verdict is appended to `<branch>.verdict.md` beside the packet, one dated section per run with a `Usage:` line (the judge's tokens and cost), so a FAIL followed by a PASS leaves both. On FAIL, fix what it names, re-run step 6, rewrite the packet with the new HEAD, and push again. Never edit the packet to argue with the judge, and never edit `.claude/judge/*.verdict.md`. If the gate says the claude CLI is not logged in, stop and tell the user; that is a one-time `claude login` on their side.
+The push is gated by `~/.claude/hooks/judge-gate.sh`, a PreToolUse hook on every real push. It refuses the push, with the reason returned to you, when any of these fail: no packet; packet `HEAD` is not the current HEAD; `CHECKS_SHA` is not the first commit after `BASE` that touches `<tests>`; uncommitted changes in `<tests>`; a commit after `CHECKS_SHA` touching `<tests>` whose title is not `<KEY>: Correct check ...`; a Correct check commit touching a test file the checks commit did not; a diff since `BASE` that touches a deployable surface (the paths and the task pattern in `.claude/harness.json`: by default a workflow, a Dockerfile, `docker/`, `alembic/` or `migrations/`, the `Makefile`, or a file adding or changing a task or scheduled-job decorator) while the packet has no `DEPLOY_AND_PROMOTION` line of at least ten words, named with the touched paths; any red test (there is no accepted-failures list), or a suite that did not run to a green finish. It then runs the suite itself (the command in `.claude/harness.json`) and hands the summary, the diff stat and the packet to a headless judge, which reads the checks, the diff, the Verify output and the `DEPLOY_AND_PROMOTION` line and ends with `VERDICT: PASS` or `VERDICT: FAIL`. The judge fails a packet that touches a deployable surface without a deploy line that matches the diff: a line saying none while the diff adds a task, a workflow, a Dockerfile or a migration, or a line that leaves out a deploy-order note the scope reviewer wrote. The gate also refuses the push when it cannot finish inside its own time budget (a slow suite, a slow judge, a machine that slept): push again with the machine awake, since a hook that outlives its timeout would let the push through unjudged. After a successful push a second hook posts the verdict as a commit status on the pushed sha, which a CI job may require. The verdict is appended to `<branch>.verdict.md` beside the packet, one dated section per run with a `Usage:` line (the judge's tokens and cost), so a FAIL followed by a PASS leaves both. On FAIL, fix what it names, re-run step 6, rewrite the packet with the new HEAD, and push again. Never edit the packet to argue with the judge, and never edit `.claude/judge/*.verdict.md`. If the gate says the claude CLI is not logged in, stop and tell the user; that is a one-time `claude login` on their side.
 
 Push the branch with `git -C <repo root> push -u origin <branch>` so the gate judges the right repo. Open the PR with `gh pr create` against `main`. When `gh` is not authenticated, write a prefilled compare link instead and give it to the user:
 
@@ -145,7 +146,7 @@ Done when: the user has a PR link, the PR body matches the spec, and the `.claud
 
 ## 8. Close the session, and every fifth ticket review the loop
 
-The PR being merged to `main` ends the session. Promotion to a release branch is a separate PR on its own schedule, per `CLAUDE.md`'s deploy paths. A repo fact learned this session (a command, a gotcha, a wrong assumption) is a one-line edit to the local `CLAUDE.md`, which is never committed, or a note to the user.
+The PR being merged to `main` ends the session. Promotion to a release branch is a separate PR on its own schedule, per `CLAUDE.md`'s deploy paths, rolled in the order the packet's `DEPLOY_AND_PROMOTION` line states. A repo fact learned this session (a command, a gotcha, a wrong assumption) is a one-line edit to the local `CLAUDE.md`, which is never committed, or a note to the user.
 
 Right after the PR is open, append the ticket's row to `.claude/metrics.csv` (columns in `docs/metrics.md` of the harness repo):
 

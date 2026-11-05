@@ -3,6 +3,15 @@
   "test_paths": ["tests/"],
   "protected_branches": ["main", "master", "release/*"],
   "base_ref": "origin/main",
+  "budget": 1200,
+  "deploy": {
+    "paths": [".github/workflows/", "Dockerfile*", "*/Dockerfile*", "docker/", "alembic/", "migrations/", "Makefile"],
+    "patterns": "@(celery_app|app)\\.task|@shared_task|beat_schedule|add_periodic_task"
+  },
+  "status": {
+    "context": "judge-gate/verdict",
+    "gh_user": ""
+  },
   "suite": {
     "command": "poetry run pytest tests/unit -q --continue-on-collection-errors -p no:cacheprovider",
     "typecheck_command": "npx tsc --noEmit",
