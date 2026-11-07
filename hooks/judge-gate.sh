@@ -11,9 +11,19 @@ GATE_START=$(date +%s)   # the wall-clock budget below counts from the first lin
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 # Exact match on an actual push command, not the best-effort "if" filter.
-# Command position only: line start, after ; & | && ||, or inside $( ... ). A bare "(" is
-# deliberately not accepted, so the hook matcher string quoted inside a heredoc does not count.
-printf '%s' "$CMD" | grep -Eq '(^|[;&|]|&&|\|\||\$\()[[:space:]]*(env[[:space:]]+[^;&|]*[[:space:]])?git[[:space:]]+(-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+)?push([[:space:]]|$)' || { echo '{}'; exit 0; }
+# --- push recognition: keep this block identical in judge-gate.sh and judge-status.sh (test-push-regex-sync.sh diffs it) ---
+# Command position only: line start, after ; & | && ||, or inside $( ... ). A bare "(" is deliberately not accepted,
+# so the hook matcher string quoted inside a heredoc does not count. Any number of NAME=value assignments may precede
+# the command, each value a bare word, a quoted string, $VAR, ${...} or $(...): on 2026-11-07
+# `GH_TOKEN=$(gh auth token --user X) git -C "/wt" push -u origin b` was not recognised by either hook and reached GitHub
+# with no judge run and no commit status. `env NAME=value ... git push` is accepted as before.
+ASSIGN_RE='([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'"'"'[^'"'"']*'"'"'|\$\([^)]*\)|\$\{[^}]*\}|[^[:space:];&|"'"'"'])*[[:space:]]+)*'
+ENV_RE='(env[[:space:]]+[^;&|]*[[:space:]])?'
+PUSH_RE='(^|[;&|]|&&|\|\||\$\()[[:space:]]*'"$ASSIGN_RE$ENV_RE"'git[[:space:]]+(-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+)?push([[:space:]]|$)'
+# The text before a plain `git push` (no -C), where the last `cd <path>` names the target repo.
+PRE_RE='(^|[;&|]|&&|\|\|)[[:space:]]*'"$ASSIGN_RE$ENV_RE"'git[[:space:]]+push.*$'
+# --- end push recognition ---
+printf '%s' "$CMD" | grep -Eq "$PUSH_RE" || { echo '{}'; exit 0; }
 
 deny() { jq -cn --arg r "$1" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'; exit 0; }
 
@@ -23,12 +33,17 @@ cd "$CWD" 2>/dev/null || { echo '{}'; exit 0; }
 # and the last `cd <path>` that precedes the push in the command text.
 TARGET=$(printf '%s' "$CMD" | grep -Eo 'git[[:space:]]+-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+push' | tail -1 | sed -E 's/^git[[:space:]]+-C[[:space:]]+//; s/[[:space:]]+push$//; s/^["'"'"']//; s/["'"'"']$//')
 if [ -z "$TARGET" ]; then
-  PRE=$(printf '%s' "$CMD" | sed -E 's/(^|[;&|]|&&|\|\|)[[:space:]]*git[[:space:]]+push.*$//')
+  PRE=$(printf '%s' "$CMD" | sed -E "s/$PRE_RE//")
   TARGET=$(printf '%s' "$PRE" | grep -Eo '(^|[;&|]|&&|\|\|)[[:space:]]*cd[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:];&|]+)' | tail -1 | sed -E 's/^.*cd[[:space:]]+//; s/^["'"'"']//; s/["'"'"']$//')
 fi
 if [ -n "$TARGET" ]; then
   TARGET="${TARGET/#\~/$HOME}"
-  cd "$TARGET" 2>/dev/null || deny "judge gate: the push targets '$TARGET' but that directory cannot be entered from $CWD."
+  if ! cd "$TARGET" 2>/dev/null; then
+    case "$TARGET" in
+      *'$'*) deny "judge gate: the push targets '$TARGET' but that directory cannot be entered from $CWD: the hook reads the command text literally and does not expand shell variables, so spell the path out (git -C /full/path push)." ;;
+      *) deny "judge gate: the push targets '$TARGET' but that directory cannot be entered from $CWD." ;;
+    esac
+  fi
 fi
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo '{}'; exit 0; }
 cd "$ROOT"

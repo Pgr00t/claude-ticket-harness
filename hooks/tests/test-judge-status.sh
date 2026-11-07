@@ -152,6 +152,11 @@ run_hook "cd '$B' && $PUSH" "$A" "$PUSHED";        expect_posted 'cd with a quot
 run_hook "git -C $B push -u origin KEY-1-thing" "$A" "$PUSHED"; expect_posted 'git -C <root> push from another repo' Acme/other "$SHA_B" success 'VERDICT: PASS 2026-11-03T11:00:00Z'
 run_hook "git -C \"$B\" push" "$T" "$PUSHED";       expect_posted 'git -C with a quoted path from a non-repo cwd' Acme/other "$SHA_B" success 'VERDICT: PASS 2026-11-03T11:00:00Z'
 run_hook "cd $B/nonexistent && $PUSH" "$A" "$PUSHED"; expect_nothing 'a cd to a missing directory'
+run_hook "GH_TOKEN=\$(gh auth token --user X) git -C \"$B\" push -u origin KEY-1-thing" "$A" "$PUSHED"; expect_posted 'NAME=$(...) git -C <root> push (the 2026-11-07 bypass)' Acme/other "$SHA_B" success 'VERDICT: PASS 2026-11-03T11:00:00Z'
+run_hook "FOO=1 BAR=2 $PUSH" "$B" "$PUSHED";       expect_posted 'two bare assignments before the push' Acme/other "$SHA_B" success 'VERDICT: PASS 2026-11-03T11:00:00Z'
+run_hook "cd $B && FOO=1 env BAR=2 $PUSH" "$A" "$PUSHED"; expect_posted 'cd <wt> && assignment env ... push' Acme/other "$SHA_B" success 'VERDICT: PASS 2026-11-03T11:00:00Z'
+run_hook "git -C \"\$WT\" push" "$A" "$PUSHED";    expect_nothing 'git -C with an unexpanded variable'
+grep -q "spell the path out" "$JUDGE_STATUS_LOG" && ok 'the unexpanded variable is logged as a literal-text limit' || { OUT="$(tail -3 "$JUDGE_STATUS_LOG")"; bad 'the unexpanded variable is logged as a literal-text limit'; }
 C="$T/nogithub"; new_repo "$C" /srv/git/local.git; verdict "$C" "$(head_sha "$C")" PASS 2026-11-03T07:00:00Z
 run_hook "$PUSH" "$C" "$PUSHED";                   expect_nothing 'an origin that is not on GitHub'
 

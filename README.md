@@ -11,7 +11,7 @@ It is five hooks, one skill, a CI job and a config file:
 - **`hooks/metrics-row.py`**: one row per round in a CSV, from the packet, the verdict file, git and `gh`; an `--outcomes` pass later fills the defect-escape columns from the tracker, GitHub and Sentry.
 - **`skills/ticket/SKILL.md`**: the `/ticket` procedure. Spec, plan, approval, then checks red and committed, build, verify against the running app, packet, push, PR, round log, and a review every five rows that rewrites the rules the session works by.
 
-`docs/how-it-works.md` has the whole mechanism. `hooks/tests/` runs the real scripts against throwaway repos with fake `poetry`, `claude` and `gh` binaries, 267 cases, about twenty seconds.
+`docs/how-it-works.md` has the whole mechanism. `hooks/tests/` runs the real scripts against throwaway repos with fake `poetry`, `claude` and `gh` binaries, 304 cases, about twenty seconds.
 
 ## The judge that rationalised
 
@@ -26,6 +26,10 @@ Scripts for facts, models for judgement. The full story, including the two follo
 The second incident was the runtime's, not the judge's. A laptop went to sleep while the gate was running the suite and the judge; the hook's wall-clock timeout expired before the next wake, and Claude Code treats a PreToolUse hook that times out as cancelled and runs the tool anyway. The push went out with no verdict, and the session's own notes said it had "gone through in seconds". Reproduced headlessly with a hook that sleeps past a five-second timeout and then denies: the model reports that the push succeeded.
 
 The gate now keeps its own clock (`budget` in the config, default 1200 s, with the hook timeout in `settings.example.json` at least twice that, which the tests assert) and refuses the push when a step cannot finish in time. Since a refusal from inside the hook cannot survive a sleep that outlives the outer timeout either, the verdict is also published as a commit status after every push, and a CI job fails the pull request when the head sha has none. The write-up is [`docs/fail-open-on-timeout.md`](docs/fail-open-on-timeout.md).
+
+## The assignment that hid the push
+
+The third bypass was a regex gap, found on 2026-11-07. The hooks recognise a push by matching the command text, and the match accepted an `env NAME=value git push` prefix but not a plain `NAME=value git push` one. A session pinning its GitHub account with `GH_TOKEN=$(gh auth token --user X) git -C "/worktree" push -u origin branch` was therefore seen by neither hook: no judge ran, no commit status was posted, and the CI job's red check was the only trace. Both hooks now share one marker-delimited block of regexes that accepts any number of leading `NAME=value` assignments (bare, quoted, `$VAR`, `${...}` or `$(...)`), and `hooks/tests/test-push-regex-sync.sh` fails when the two copies drift. A related limit is now stated in the denial: the hook reads the command text literally, so `git -C "$WT" push` is refused with a message that says to spell the path out.
 
 ## Install
 

@@ -15,9 +15,9 @@
 #                        accounts signed in; default none, so gh's active account posts. JUDGE_STATUS_GH_USER
 #                        in the environment wins over the config.
 #
-# The push recognition below (the command regex, `git -C <path>` and the last `cd <path>` before the push) is a
+# The push recognition below (the regex block, `git -C <path>` and the last `cd <path>` before the push) is a
 # copy of judge-gate.sh's, not a `source`: the gate runs the suite and the judge at top level, so sourcing it
-# would run them. When the gate's recognition changes, change this copy too.
+# would run them. tests/test-push-regex-sync.sh fails when the two regex blocks differ.
 set -u
 LOG="${JUDGE_STATUS_LOG:-$HOME/.claude/hooks/logs/judge-status.log}"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -27,8 +27,19 @@ finish() { echo '{}'; exit 0; }
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
 [ -n "$CMD" ] || finish
-# Command position only: line start, after ; & | && ||, or inside $( ... ). A bare "(" is deliberately not accepted.
-printf '%s' "$CMD" | grep -Eq '(^|[;&|]|&&|\|\||\$\()[[:space:]]*(env[[:space:]]+[^;&|]*[[:space:]])?git[[:space:]]+(-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+)?push([[:space:]]|$)' || finish
+# --- push recognition: keep this block identical in judge-gate.sh and judge-status.sh (test-push-regex-sync.sh diffs it) ---
+# Command position only: line start, after ; & | && ||, or inside $( ... ). A bare "(" is deliberately not accepted,
+# so the hook matcher string quoted inside a heredoc does not count. Any number of NAME=value assignments may precede
+# the command, each value a bare word, a quoted string, $VAR, ${...} or $(...): on 2026-11-07
+# `GH_TOKEN=$(gh auth token --user X) git -C "/wt" push -u origin b` was not recognised by either hook and reached GitHub
+# with no judge run and no commit status. `env NAME=value ... git push` is accepted as before.
+ASSIGN_RE='([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'"'"'[^'"'"']*'"'"'|\$\([^)]*\)|\$\{[^}]*\}|[^[:space:];&|"'"'"'])*[[:space:]]+)*'
+ENV_RE='(env[[:space:]]+[^;&|]*[[:space:]])?'
+PUSH_RE='(^|[;&|]|&&|\|\||\$\()[[:space:]]*'"$ASSIGN_RE$ENV_RE"'git[[:space:]]+(-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+)?push([[:space:]]|$)'
+# The text before a plain `git push` (no -C), where the last `cd <path>` names the target repo.
+PRE_RE='(^|[;&|]|&&|\|\|)[[:space:]]*'"$ASSIGN_RE$ENV_RE"'git[[:space:]]+push.*$'
+# --- end push recognition ---
+printf '%s' "$CMD" | grep -Eq "$PUSH_RE" || finish
 # A dry run prints the same "-> branch" line as a real push but moves nothing.
 printf '%s' "$CMD" | grep -Eq 'git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?push[^;&|]*[[:space:]](--dry-run|-n)([[:space:]]|$)' && { log "skip: dry run: $CMD"; finish; }
 
@@ -51,12 +62,18 @@ cd "$CWD" 2>/dev/null || { log "skip: cannot enter cwd $CWD"; finish; }
 # and the last `cd <path>` that precedes the push in the command text.
 TARGET=$(printf '%s' "$CMD" | grep -Eo 'git[[:space:]]+-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+)[[:space:]]+push' | tail -1 | sed -E 's/^git[[:space:]]+-C[[:space:]]+//; s/[[:space:]]+push$//; s/^["'"'"']//; s/["'"'"']$//')
 if [ -z "$TARGET" ]; then
-  PRE=$(printf '%s' "$CMD" | sed -E 's/(^|[;&|]|&&|\|\|)[[:space:]]*git[[:space:]]+push.*$//')
+  PRE=$(printf '%s' "$CMD" | sed -E "s/$PRE_RE//")
   TARGET=$(printf '%s' "$PRE" | grep -Eo '(^|[;&|]|&&|\|\|)[[:space:]]*cd[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:];&|]+)' | tail -1 | sed -E 's/^.*cd[[:space:]]+//; s/^["'"'"']//; s/["'"'"']$//')
 fi
 if [ -n "$TARGET" ]; then
   TARGET="${TARGET/#\~/$HOME}"
-  cd "$TARGET" 2>/dev/null || { log "skip: push targets '$TARGET' but it cannot be entered from $CWD"; finish; }
+  if ! cd "$TARGET" 2>/dev/null; then
+    case "$TARGET" in
+      *'$'*) log "skip: push targets '$TARGET' but it cannot be entered from $CWD: the hook reads the command text literally and does not expand shell variables, so spell the path out (git -C /full/path push)" ;;
+      *) log "skip: push targets '$TARGET' but it cannot be entered from $CWD" ;;
+    esac
+    finish
+  fi
 fi
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { log "skip: not a git repo: $PWD"; finish; }
 cd "$ROOT" || finish

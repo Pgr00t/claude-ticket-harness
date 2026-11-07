@@ -113,6 +113,25 @@ run_gate "cd $R && $PUSH -u origin b" "$T";       expect_deny 'cd <repo> && push
 run_gate "cd '$R' && $PUSH 2>&1 | tail -3; echo \"push exit: \$?\"" "$T"; expect_deny 'the worktree push form with a pipe and $? enters the gate' 'no packet'
 run_gate "$PUSH" "$T";                            expect_allow 'a push from a folder that is not a git repo passes through'
 run_gate 'git -C /nonexistent-dir-xyz push' "$R"; expect_deny 'git -C <missing dir> push is refused' 'cannot be entered'
+run_gate 'git -C "$WT" push' "$R";               expect_deny 'git -C with an unexpanded variable is refused' 'cannot be entered'
+run_gate 'git -C "$WT" push' "$R";               expect_deny 'git -C with an unexpanded variable says the path must be spelled out' 'spell the path out'
+
+echo "# command filter: NAME=value assignments before the push do not hide it (2026-11-07 bypass)"
+R="$T/filter-env"; new_repo "$R"; rm "$R/.claude/judge/KEY-1-thing.md"
+run_gate "GH_TOKEN=\$(gh auth token --user X) git -C \"$R\" push -u origin KEY-1-thing" "$T"; expect_deny 'NAME=$(...) git -C <repo> push enters the gate' 'no packet'
+run_gate "GH_TOKEN=\$(gh auth token --user X) $PUSH -u origin KEY-1-thing" "$R"; expect_deny 'NAME=$(...) push enters the gate' 'no packet'
+run_gate "FOO=1 BAR=2 $PUSH" "$R";                expect_deny 'two bare assignments before the push enter the gate' 'no packet'
+run_gate "FOO='a b' BAR=\"c d\" $PUSH" "$R";      expect_deny 'quoted assignments before the push enter the gate' 'no packet'
+run_gate "FOO=\$BAR BAZ=\${QUX:-1} $PUSH" "$R";   expect_deny 'variable-valued assignments before the push enter the gate' 'no packet'
+run_gate "FOO=1 env BAR=2 $PUSH" "$R";            expect_deny 'an assignment before env ... push enters the gate' 'no packet'
+run_gate "make ci/check && FOO=1 $PUSH" "$R";     expect_deny 'an assignment-prefixed push after && enters the gate' 'no packet'
+run_gate "true; FOO=1 $PUSH" "$R";                expect_deny 'an assignment-prefixed push after ; enters the gate' 'no packet'
+run_gate "false || FOO=1 $PUSH" "$R";             expect_deny 'an assignment-prefixed push after || enters the gate' 'no packet'
+run_gate "echo x | FOO=1 $PUSH" "$R";             expect_deny 'an assignment-prefixed push after | enters the gate' 'no packet'
+run_gate "echo \$(FOO=1 $PUSH 2>&1)" "$R";        expect_deny 'an assignment-prefixed push inside $( ) enters the gate' 'no packet'
+run_gate "cd $R && GH_TOKEN=\$(gh auth token --user X) $PUSH -u origin b; cd /" "$T"; expect_deny 'cd <repo> && NAME=$(...) push from another cwd enters the gate' 'no packet'
+run_gate "FOO=1 git pushy" "$R";                  expect_allow 'an assignment before git pushy is not a push'
+run_gate "FOO=1 echo \"$PUSH\"" "$R";             expect_allow 'an assignment before a quoted echo of a push is not a push'
 
 echo "# branches: main and release branches are never gated"
 R="$T/branch"; new_repo "$R"; rm "$R/.claude/judge/KEY-1-thing.md"
