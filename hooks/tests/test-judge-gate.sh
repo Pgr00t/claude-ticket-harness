@@ -145,7 +145,7 @@ packet "$R" "$(checks_sha "$R")";                       run_gate "$PUSH" "$R"; e
 packet "$R" "" "0000000000000000000000000000000000000000"; run_gate "$PUSH" "$R"; expect_deny 'packet CHECKS_SHA must be a commit' 'CHECKS_SHA'
 packet "$R";                                             run_gate "$PUSH" "$R"; expect_pass 'a correct packet, a clean lock, a green suite and a PASS judge allow the push'
 [ -f "$R/.claude/judge/KEY-1-thing.verdict.md" ] && grep -q 'VERDICT: PASS' "$R/.claude/judge/KEY-1-thing.verdict.md" && ok 'the verdict is saved beside the packet' || { OUT="$(ls "$R/.claude/judge")"; bad 'the verdict is saved beside the packet'; }
-grep -q -- '--model claude-fable-5-1' "$FAKE_CLAUDE_ARGS" && grep -q -- '--disallowedTools Edit,Write' "$FAKE_CLAUDE_ARGS" && ok 'the judge runs on the default model with Edit and Write disallowed' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge runs on the default model with Edit and Write disallowed'; }
+grep -q -- '--model claude-fable-5-2' "$FAKE_CLAUDE_ARGS" && grep -q -- '--disallowedTools Edit,Write' "$FAKE_CLAUDE_ARGS" && ok 'the judge runs on the default model with Edit and Write disallowed' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge runs on the default model with Edit and Write disallowed'; }
 grep -q -- '--allowedTools Read,Grep,Glob,Bash(git diff \*),Bash(git show \*),Bash(git log \*),Bash(git grep \*),Bash(poetry run pytest \*),Bash(npx vitest run \*),Bash(npx tsc \*)' "$FAKE_CLAUDE_ARGS" && ok 'the judge gets the read-only tools plus the default suite runners' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge gets the read-only tools plus the default suite runners'; }
 
 echo "# test-file lock"

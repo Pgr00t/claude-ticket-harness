@@ -93,7 +93,7 @@ Everything site-specific lives in `.claude/harness.json` in the target repo. The
 | `suite.env_file` | `.env.test` (loaded line by line, `KEY=value` lines only, before the suite) | gate |
 | `suite.env` | `{}`; defaults for variables that are still unset after the env file | gate |
 | `suite.timeout` | `300` seconds per suite step, capped by what is left of `budget` (needs coreutils `timeout`; without it the step runs unbounded) | gate |
-| `judge.model` | `claude-fable-5-1` | gate |
+| `judge.model` | `claude-fable-5-2` | gate |
 | `judge.timeout` | `840` seconds, capped by what is left of `budget`; the judge is not started with less than 60 s left | gate |
 | `judge.extra_allowed_tools` | `["Bash(poetry run pytest *)","Bash(npx vitest run *)","Bash(npx tsc *)"]`, added to Read, Grep, Glob and read-only git; `[]` removes them | gate |
 | `ticket_key_regex` | `\b[A-Z]{2,}-\d+` (Python syntax) | metrics-row.py, to read the ticket from the branch name |

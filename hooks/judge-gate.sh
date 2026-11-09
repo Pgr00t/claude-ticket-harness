@@ -273,7 +273,7 @@ Answer with a short report: one line per step 1 to 7, PASS or FAIL with file:lin
 PEOF
 )
 
-JUDGE_MODEL=$(cfg '.judge.model' 'claude-fable-5-1')
+JUDGE_MODEL=$(cfg '.judge.model' 'claude-fable-5-2')
 JUDGE_TIMEOUT=$(cfg '.judge.timeout' 840)
 # The judge may read, grep and run read-only git; config `judge.extra_allowed_tools` adds to that
 # (default: the suite runners), so it can re-run a test it doubts. It can never write or change history.
