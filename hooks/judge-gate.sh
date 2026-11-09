@@ -291,11 +291,15 @@ OUT=$( (unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; run_timed "$T" claude -p "$PROM
 [ "$JUDGE_RC" -eq 124 ] && out_of_time "the judge did not finish within $T s"
 [ "$(remaining)" -gt 0 ] || out_of_time "the gate ran past its $GATE_BUDGET_S s budget while the judge ran"
 printf '%s' "$OUT" | grep -q 'Not logged in' && deny "judge gate: the claude CLI used for the headless judge is not logged in. Run 'claude login' once in a terminal (same account as the app), then push again."
-REPORT=$(printf '%s' "$OUT" | jq -r '.result // empty' 2>/dev/null)
+# The CLI may print warning lines before the JSON (seen 2026-11-09: "[claude-code:unrecognized_model] {...}"
+# for a model newer than the CLI's table), so the report is read from the JSON document alone: the
+# last line that is one, which is where --output-format json puts it.
+JSON=$(printf '%s\n' "$OUT" | grep -E '^\{' | grep -E '"result"|"usage"|"is_error"' | tail -1)
+REPORT=$(printf '%s' "$JSON" | jq -r '.result // empty' 2>/dev/null)
 [ -n "$REPORT" ] || deny "judge gate: the judge did not return a report. Raw output (first lines):"$'\n'"$(printf '%s' "$OUT" | head -c 1500)"
 
 # Usage and cost come back in the same JSON; keep them for the metrics file (.claude/metrics.csv: judge_tokens).
-USAGE=$(printf '%s' "$OUT" | jq -r '"input=\(.usage.input_tokens // 0) cache_create=\(.usage.cache_creation_input_tokens // 0) cache_read=\(.usage.cache_read_input_tokens // 0) output=\(.usage.output_tokens // 0) cost_usd=\(.total_cost_usd // 0) duration_s=\(((.duration_ms // 0) / 1000) | floor)"' 2>/dev/null)
+USAGE=$(printf '%s' "$JSON" | jq -r '"input=\(.usage.input_tokens // 0) cache_create=\(.usage.cache_creation_input_tokens // 0) cache_read=\(.usage.cache_read_input_tokens // 0) output=\(.usage.output_tokens // 0) cost_usd=\(.total_cost_usd // 0) duration_s=\(((.duration_ms // 0) / 1000) | floor)"' 2>/dev/null)
 [ -n "$USAGE" ] || USAGE="unavailable"
 
 # One dated section per run, appended: a FAIL followed by a PASS leaves both (judge_fails in the metrics file).

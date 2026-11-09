@@ -31,6 +31,9 @@ case "${FAKE_CLAUDE_MODE:-PASS}" in
   notloggedin) echo "Not logged in · Please run /login"; exit 1;;
   empty) echo '{"result":""}'; exit 0;;
   slow) sleep 3; jq -cn '{result:"VERDICT: PASS"}';;
+  warned) # a CLI newer than its model table prints a warning line before the JSON (seen 2026-11-09)
+    echo '[claude-code:unrecognized_model] {"model":"claude-fable-5-2","query_source":"sdk"}'
+    jq -cn '{result:"1. CLAUDE.md PASS\nVERDICT: PASS", usage:{input_tokens:42, cache_creation_input_tokens:105490, cache_read_input_tokens:1655399, output_tokens:21184}, total_cost_usd:3.58, duration_ms:211092}';;
   *) jq -cn --arg r "1. CLAUDE.md PASS"$'\n'"VERDICT: ${FAKE_CLAUDE_MODE:-PASS}" '{result:$r, usage:{input_tokens:1200, cache_creation_input_tokens:300, cache_read_input_tokens:4500, output_tokens:250}, total_cost_usd:0.0421, duration_ms:61400}';;
 esac
 X
@@ -291,6 +294,9 @@ FAKE_CLAUDE_MODE=FAIL;        run_gate "$PUSH" "$R"; expect_deny 'VERDICT: FAIL 
 grep -q 'VERDICT: FAIL' "$R/.claude/judge/KEY-1-thing.verdict.md" && ok 'a FAIL verdict is saved too' || { OUT="$(cat "$R/.claude/judge/KEY-1-thing.verdict.md" 2>&1)"; bad 'a FAIL verdict is saved too'; }
 FAKE_CLAUDE_MODE=notloggedin; run_gate "$PUSH" "$R"; expect_deny 'a logged-out CLI is reported, not treated as a verdict' 'not logged in'
 FAKE_CLAUDE_MODE=empty;       run_gate "$PUSH" "$R"; expect_deny 'an empty judge result is refused' 'did not return a report'
+RW="$T/judge-warned"; new_repo "$RW"
+FAKE_CLAUDE_MODE=warned;      run_gate "$PUSH" "$RW"; expect_pass 'a CLI warning line printed before the JSON does not hide the verdict'
+grep -q 'cost_usd=3.58 duration_s=211' "$RW/.claude/judge/KEY-1-thing.verdict.md" && ok 'the usage line is read from the same JSON despite the warning' || { OUT="$(cat "$RW/.claude/judge/KEY-1-thing.verdict.md" 2>&1)"; bad 'the usage line is read from the same JSON despite the warning'; }
 FAKE_CLAUDE_MODE=PASS;        run_gate "cd $R && $PUSH -u origin KEY-1-thing" "$T"; expect_pass 'the target repo is taken from the cd before the push'
 V="$R/.claude/judge/KEY-1-thing.verdict.md"
 [ "$(grep -c '^# Judge verdict for KEY-1-thing' "$V")" = 2 ] && grep -q 'VERDICT: FAIL' "$V" && grep -q 'VERDICT: PASS' "$V" && ok 'a second run appends a dated section, so the earlier FAIL is kept beside the PASS' || { OUT="$(cat "$V" 2>&1)"; bad 'a second run appends a dated section, so the earlier FAIL is kept beside the PASS'; }
