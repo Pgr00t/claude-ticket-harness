@@ -338,7 +338,9 @@ class OutcomesPass(unittest.TestCase):
             before = list(csv.DictReader(f))
         out, rows = self.run_pass(FakeSources(review={"1462": "0", "1464": "0"}, bounces={"KEY-2263/KEY-2264": "0"}, incidents={"1462": "0", "1464": "0"}))
         with open(self.path) as f:
-            self.assertEqual(f.readline().strip(), HEADER_OLD.replace("qa_bounces,", "qa_bounces,prod_incidents,"))
+            self.assertEqual(f.readline().strip(),
+                             HEADER_OLD.replace("qa_bounces,", "qa_bounces,prod_incidents,")
+                             .replace("judge_tokens,", "judge_tokens,usage_output,usage_total,"))
         new = rows[1]
         self.assertEqual((new["qa_bounces"], new["human_review_comments"], new["prod_incidents"]), ("0", "0", "0"))
         for col in before[1]:
@@ -351,8 +353,14 @@ class OutcomesPass(unittest.TestCase):
         self.run_pass(FakeSources(review={"1453": "9"}, bounces={"KEY-2254 (readiness)": "9"}, incidents={"1453": "9"}))
         with open(self.path) as f:
             text = f.read().splitlines()
-        self.assertEqual(text[1], ROW_OLD.replace(",0,1,1,0,0,,", ",0,1,,1,0,0,,", 1))
-        self.assertEqual(next(csv.DictReader(text))["qa_bounces"], "1")
+        # Same cells, plus a blank one for each column the file predates: prod_incidents after
+        # qa_bounces, usage_output and usage_total after judge_tokens.
+        self.assertEqual(text[1], ROW_OLD.replace(",0,1,1,0,0,,", ",0,1,,1,0,0,,", 1)
+                         .replace(",20.6,,,,,\"", ",20.6,,,,,,,\"", 1))
+        old = next(csv.DictReader(text))
+        self.assertEqual(old["qa_bounces"], "1")
+        self.assertEqual((old["usage_output"], old["usage_total"], old["interruptions"]), ("", "", ""))
+        self.assertTrue(old["note"].startswith("no plan file"))
 
     def test_an_empty_since_means_every_row(self):
         out, rows = self.run_pass(FakeSources(review={"1453": "7", "1462": "0", "1464": "0"}), since="")
@@ -480,6 +488,83 @@ class SourcesRules(unittest.TestCase):
         self.assertEqual(s.incidents({"pr": "1462", "pr_state": "MERGED", "ticket": "KEY-2263"}), "1")
         self.assertEqual(s.incident_ids["1462"], ["WIDGETS-API-ZZ"])
         self.assertIn(["git", "-C", "/r", "fetch", "-q", "origin", "release/live"], seen)
+
+
+# What a transcript tally tool prints for `--session <id> --by model --csv`: one row per model.
+USAGE_CSV = ("key,messages,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,total_tokens\n"
+             "model-a,3,10,200,30,4000,4240\n"
+             "model-b,1,1,50,0,100,151\n")
+
+
+class Usage(unittest.TestCase):
+    def test_the_two_columns_sit_after_judge_tokens_and_note_stays_last(self):
+        i = mr.COLUMNS.index("judge_tokens")
+        self.assertEqual(mr.COLUMNS[i + 1:i + 3], ["usage_output", "usage_total"])
+        self.assertEqual(mr.COLUMNS[i + 3], "interruptions")
+        self.assertEqual(mr.COLUMNS[-1], "note")
+
+    def test_sums_output_and_total_over_every_row_the_tool_prints(self):
+        seen = []
+
+        def run(args):
+            seen.append(args)
+            return 0, USAGE_CSV, "read 2 files\n"
+        self.assertEqual(mr.usage_fields("abc123", "/bin/tally", run), ("250", "4391", ""))
+        self.assertEqual(seen, [["/bin/tally", "--session", "abc123", "--by", "model", "--csv"]])
+
+    def test_no_session_asks_nothing_and_is_blank_without_a_complaint(self):
+        def run(args):
+            raise AssertionError("the tool was run without a session to ask about")
+        self.assertEqual(mr.usage_fields("", "/bin/tally", run), ("", "", ""))
+
+    def test_no_tool_is_blank_and_the_reason_names_the_config_key(self):
+        def run(args):
+            raise AssertionError("there is no tool to run")
+        output, total, problem = mr.usage_fields("abc123", "", run)
+        self.assertEqual((output, total), ("", ""))
+        self.assertIn("usage_command", problem)
+
+    def test_a_failing_tool_is_blank_never_zero_and_its_error_line_is_the_reason(self):
+        def run(args):
+            return 1, "", "warning: something\nerror: no usage found for a session id starting with 'abc123'\n"
+        output, total, problem = mr.usage_fields("abc123", "/bin/tally", run)
+        self.assertEqual((output, total), ("", ""))
+        self.assertIn("no usage found", problem)
+
+    def test_a_failing_tool_that_says_nothing_is_named_with_its_exit_status(self):
+        output, total, problem = mr.usage_fields("abc123", "/bin/tally", lambda args: (3, USAGE_CSV, ""))
+        self.assertEqual((output, total), ("", ""))
+        self.assertIn("/bin/tally", problem)
+        self.assertIn("3", problem)
+
+    def test_output_that_is_not_the_csv_or_has_no_rows_is_blank(self):
+        header_only = USAGE_CSV.splitlines()[0] + "\n"
+        not_numbers = USAGE_CSV.replace("4240", "lots")
+        other_columns = "branch,tokens\nmain,5\n"
+        for printed in (header_only, not_numbers, other_columns, "", "hello\nworld\n"):
+            output, total, problem = mr.usage_fields("abc123", "/bin/tally", lambda args, p=printed: (0, p, ""))
+            self.assertEqual((output, total), ("", ""), printed)
+            self.assertTrue(problem, printed)
+
+    def test_the_command_is_the_configs_usage_command_else_cc_tally_where_it_is_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".claude"))
+            nowhere = os.path.join(d, "no-such-cargo-bin", "cc-tally")
+            self.assertEqual(mr.usage_command(d, which=lambda name: None, fallback=nowhere), "")
+            self.assertEqual(mr.usage_command(d, which=lambda name: "/opt/bin/" + name, fallback=nowhere), "/opt/bin/cc-tally")
+            installed = os.path.join(d, "cc-tally")
+            open(installed, "w").close()
+            self.assertEqual(mr.usage_command(d, which=lambda name: None, fallback=installed), installed)
+            with open(os.path.join(d, ".claude", "harness.json"), "w") as f:
+                json.dump({"usage_command": "~/bin/my-tally"}, f)
+            self.assertEqual(mr.usage_command(d, which=lambda name: "/opt/bin/" + name, fallback=installed),
+                             os.path.expanduser("~/bin/my-tally"))
+
+    def test_the_default_runner_reports_a_missing_program_as_a_failure_not_an_exception(self):
+        code, out, err = mr.tool([os.path.join(tempfile.gettempdir(), "no-such-program-for-metrics-row")])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertTrue(err)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ printf '# Judge verdict for KEY-7-thing at x (t)\nUsage: input=10 cache_create=2
 
 echo "# metrics-row"
 ROW=$(python3 -I "$SCRIPT" "$R" KEY-7-thing --mutants 12/2 --qa 0 --session-tokens 999 --dry-run 2>"$T/stderr")
-field() { printf '%s' "$ROW" | python3 -I -c 'import csv,sys; cols="repo,ticket,branch,pr,pr_state,round_date,checks,rounds,correct_checks,mutants_run,mutants_survived,judge_fails,qa_bounces,prod_incidents,human_approvals,human_review_comments,changes_requested,plan_approved_utc,packet_utc,pushed_utc,pr_opened_utc,pr_merged_utc,plan_to_push_min,open_to_merge_h,spec_started_utc,session_tokens,judge_tokens,interruptions,note".split(","); r=next(csv.reader(sys.stdin)); print(dict(zip(cols,r))[sys.argv[1]])' "$1"; }
+field() { printf '%s' "$ROW" | python3 -I -c 'import csv,sys; cols="repo,ticket,branch,pr,pr_state,round_date,checks,rounds,correct_checks,mutants_run,mutants_survived,judge_fails,qa_bounces,prod_incidents,human_approvals,human_review_comments,changes_requested,plan_approved_utc,packet_utc,pushed_utc,pr_opened_utc,pr_merged_utc,plan_to_push_min,open_to_merge_h,spec_started_utc,session_tokens,judge_tokens,usage_output,usage_total,interruptions,note".split(","); r=next(csv.reader(sys.stdin)); print(dict(zip(cols,r))[sys.argv[1]])' "$1"; }
 [ "$(field ticket)" = "KEY-7" ] && ok 'the ticket key is read from the branch name' || bad 'the ticket key is read from the branch name' "$ROW"
 [ "$(field checks)" = "3" ] && ok 'checks counts every test function the branch adds from BASE, Correct checks included' || bad 'checks counts every test function the branch adds from BASE, Correct checks included' "$ROW"
 [ "$(field correct_checks)" = "1" ] && ok 'correct_checks counts the Correct check commits' || bad 'correct_checks counts the Correct check commits' "$ROW"
@@ -33,6 +33,25 @@ field() { printf '%s' "$ROW" | python3 -I -c 'import csv,sys; cols="repo,ticket,
 [ "$(field judge_fails)" = "1" ] && [ "$(field judge_tokens)" = "110" ] && ok 'judge_fails and judge_tokens are summed over the verdict sections' || bad 'judge_fails and judge_tokens are summed over the verdict sections' "$ROW"
 [ "$(field mutants_run)" = "12" ] && [ "$(field mutants_survived)" = "2" ] && [ "$(field session_tokens)" = "999" ] && ok 'the typed values land in their columns' || bad 'the typed values land in their columns' "$ROW"
 [ -z "$(field pr_state)" ] && [ -z "$(field pr)" ] && ok 'without a PR number nothing is asked of gh and the PR columns stay blank' || bad 'without a PR number nothing is asked of gh and the PR columns stay blank' "$ROW"
+[ -z "$(field usage_output)" ] && [ -z "$(field usage_total)" ] && ok 'without --session the usage columns stay blank' || bad 'without --session the usage columns stay blank' "$ROW"
+
+# A stand-in for the transcript tally tool: one CSV row per model, a note on stderr, exit 1 for an unknown session.
+cat > "$FAKEBIN/cc-tally" <<'TALLY'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${TALLY_LOG:-/dev/null}"
+if [ "$2" = "nosuch" ]; then echo "error: no usage found for a session id starting with 'nosuch'" >&2; exit 1; fi
+printf 'key,messages,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,total_tokens\n'
+printf 'model-a,3,10,200,30,4000,4240\nmodel-b,1,1,50,0,100,151\n'
+echo "read 2 files" >&2
+TALLY
+chmod +x "$FAKEBIN/cc-tally"; export TALLY_LOG="$T/tally.log"
+ROW=$(python3 -I "$SCRIPT" "$R" KEY-7-thing --session abc123 --session-tokens 999 --dry-run 2>"$T/stderr")
+[ "$(field usage_output)" = "250" ] && [ "$(field usage_total)" = "4391" ] && ok '--session fills usage_output and usage_total from the tally tool, summed over its rows' || bad '--session fills usage_output and usage_total from the tally tool, summed over its rows' "$ROW $(cat "$T/stderr")"
+[ "$(cat "$T/tally.log")" = "--session abc123 --by model --csv" ] && ok 'the tally tool is asked for that one session as CSV' || bad 'the tally tool is asked for that one session as CSV' "$(cat "$T/tally.log")"
+[ "$(field session_tokens)" = "999" ] && [ "$(field interruptions)" = "0" ] && [ "$(field judge_tokens)" = "110" ] && ok 'the typed session_tokens and the columns either side are untouched' || bad 'the typed session_tokens and the columns either side are untouched' "$ROW"
+ROW=$(python3 -I "$SCRIPT" "$R" KEY-7-thing --session nosuch --dry-run 2>"$T/stderr")
+[ -z "$(field usage_output)" ] && [ -z "$(field usage_total)" ] && [ "$(field ticket)" = "KEY-7" ] && ok 'a session the tool does not know leaves the usage columns blank and the row is still written' || bad 'a session the tool does not know leaves the usage columns blank and the row is still written' "$ROW"
+grep -q 'no usage found' "$T/stderr" && [ "$(printf '%s\n' "$ROW" | wc -l | tr -d ' ')" = "1" ] && ! printf '%s' "$ROW" | grep -q 'not measured' && ok 'the reason goes to stderr, so stdout is still exactly the row' || bad 'the reason goes to stderr, so stdout is still exactly the row' "$(cat "$T/stderr") | $ROW"
 
 printf '{"ticket_key_regex":"\\\\bT[0-9]+"}\n' > "$R/.claude/harness.json"
 gitq "$R" checkout -qb T42-other

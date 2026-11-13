@@ -3,10 +3,10 @@
 `.claude/metrics.csv` in each target repo: one row per `/ticket` round-set (one packet, one push, one PR), the same columns in every repo, so `cat` of the files is the whole picture. Local-only, never committed. `/ticket` step 8 appends the row:
 
 ```
-python3 -I ~/.claude/hooks/metrics-row.py <repo root> <branch> <pr> --mutants R/S --qa N --session-tokens N
+python3 -I ~/.claude/hooks/metrics-row.py <repo root> <branch> <pr> --mutants R/S --qa N --session-tokens N --session ID
 ```
 
-It reads the packet, the verdict sections, git and `gh`; `--dry-run` prints the row; `--refresh <repo root>` re-reads `gh` for rows whose PR was open and fills the merge time; `--outcomes <repo root>` fills the three defect-escape columns (below). Timestamps are UTC to the minute. Blank means not captured; 0 means counted and zero.
+It reads the packet, the verdict sections, git and `gh`, and with `--session` asks a transcript tally tool what that session used (the two `usage_` columns); `--dry-run` prints the row; `--refresh <repo root>` re-reads `gh` for rows whose PR was open and fills the merge time; `--outcomes <repo root>` fills the three defect-escape columns (below). Timestamps are UTC to the minute. Blank means not captured; 0 means counted and zero.
 
 ## Columns
 
@@ -29,8 +29,21 @@ It reads the packet, the verdict sections, git and `gh`; `--dry-run` prints the 
 | spec_started_utc | the packet's `SPEC_STARTED` line, written at step 2 | packet |
 | session_tokens | input plus output tokens of the session, read at step 8 (`get_usage` in the app, `/cost` in the CLI) | typed |
 | judge_tokens | sum of input, cache_create, cache_read and output over every `Usage:` line in the verdict file (all judge runs for the branch) | verdict file |
+| usage_output, usage_total | what the session named by `--session` and its subagents used, measured from the transcripts: output tokens, and input plus cache write plus cache read plus output (the same four counts as `judge_tokens`, so the two compare). Not the same quantity as `session_tokens`, which is typed from the app's usage reading and tracks context size; the two do not convert into each other. Blank without `--session`, without the tool, or when the tool fails | the tally tool (below) |
 | interruptions | the packet's `INTERRUPTIONS` line: user messages after plan approval that changed scope, approach or a check; 0 when none | packet |
 | note | anything that qualifies the numbers | hand |
+
+### The usage columns
+
+`--session ID` takes the id of the `/ticket` session (or its first characters): the UUID that names the session's transcript file under `~/.claude/projects/<project>/`, which is also the UUID in the session's scratchpad path. The helper runs
+
+```
+<tool> --session ID --by model --csv
+```
+
+and sums the `output_tokens` and `total_tokens` columns over the rows it prints. The tool is `usage_command` in `.claude/harness.json`, else `cc-tally` on `PATH`, else `~/.cargo/bin/cc-tally`; any program that answers that command line with those two CSV columns will do. The session is the unit, not the branch: a branch collects every session that had it checked out and misses work a builder or reviewer did from another branch or a detached checkout, while one ticket is one session.
+
+When no session is named, no tool is found, the tool exits non-zero (an id it does not know) or prints something else, both cells are blank and the reason is printed to stderr; the row is appended all the same. A blank is never a zero. The judge runs in its own headless sessions, so its tokens are in `judge_tokens` and not in these two columns. A file written before the columns existed gets them, blank, the next time the helper rewrites it.
 
 ## What the first weeks of rows showed
 

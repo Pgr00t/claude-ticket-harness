@@ -63,7 +63,7 @@ Every five rows the skill runs a review: repeats become one-sentence rules in th
 
 ## The metrics
 
-`hooks/metrics-row.py` appends one row per round-set to `.claude/metrics.csv` from the packet, the verdict file, git and `gh`. Three values are typed because nothing on disk knows them: mutants run and survived, QA bounces, session tokens. Its `--outcomes` pass later fills the three defect-escape columns from the tracker's changelog, GitHub and Sentry, with the site's workflow names, Sentry org and release branch taken from the `outcomes` block of the config (`docs/metrics.md`, "Outcomes"). `docs/metrics.md` has the columns and what the first weeks of rows showed. The point of the file is the quality columns (human review comments, changes requested, QA bounces, judge FAILs), not the speed ones: they are the only way to tell whether the judge and the three reviewers earn their cost.
+`hooks/metrics-row.py` appends one row per round-set to `.claude/metrics.csv` from the packet, the verdict file, git and `gh`. Three values are typed because nothing on disk knows them: mutants run and survived, QA bounces, session tokens. Given the session's id (`--session`), it also asks a transcript tally tool what the session and its subagents used and records it as `usage_output` and `usage_total`; without the tool those two cells stay blank. Its `--outcomes` pass later fills the three defect-escape columns from the tracker's changelog, GitHub and Sentry, with the site's workflow names, Sentry org and release branch taken from the `outcomes` block of the config (`docs/metrics.md`, "Outcomes"). `docs/metrics.md` has the columns and what the first weeks of rows showed. The point of the file is the quality columns (human review comments, changes requested, QA bounces, judge FAILs), not the speed ones: they are the only way to tell whether the judge and the three reviewers earn their cost.
 
 ## The other three hooks
 
@@ -97,6 +97,7 @@ Everything site-specific lives in `.claude/harness.json` in the target repo. The
 | `judge.timeout` | `840` seconds, capped by what is left of `budget`; the judge is not started with less than 60 s left | gate |
 | `judge.extra_allowed_tools` | `["Bash(poetry run pytest *)","Bash(npx vitest run *)","Bash(npx tsc *)"]`, added to Read, Grep, Glob and read-only git; `[]` removes them | gate |
 | `ticket_key_regex` | `\b[A-Z]{2,}-\d+` (Python syntax) | metrics-row.py, to read the ticket from the branch name |
+| `usage_command` | none, so `cc-tally` on `PATH`, else `~/.cargo/bin/cc-tally`; the program asked `--session <id> --by model --csv` for a session's tokens (`~` is expanded) | metrics-row.py, for `usage_output` and `usage_total` |
 | `worktree_links` | `["CLAUDE.md",".claude","docs/agents","TODOS.md",".env",".env.test","node_modules"]` | link hook (read from the main checkout) |
 | `worktree_venv_hint` | `poetry install`; the one-time command the link hook names when a python main checkout has no venv to share | link hook (read from the main checkout) |
 | `formatters` | the defaults above, keyed by extension; `{file}` is the path, `""` disables | format hook |

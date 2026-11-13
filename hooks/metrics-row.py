@@ -2,7 +2,7 @@
 """Append one ticket row to <root>/.claude/metrics.csv (columns: docs/metrics.md).
 
   python3 -I hooks/metrics-row.py <repo root> <branch> <pr number> \\
-      [--mutants RUN/SURVIVED] [--qa N] [--session-tokens N] [--note TEXT] [--dry-run]
+      [--mutants RUN/SURVIVED] [--qa N] [--session-tokens N] [--session ID] [--note TEXT] [--dry-run]
   python3 -I hooks/metrics-row.py --refresh <repo root> [--dry-run]
   python3 -I hooks/metrics-row.py --outcomes <repo root> [--since YYYY-MM-DD] [--dump-dir DIR] [--dry-run]
 
@@ -10,6 +10,11 @@ The row is built from the judge packet (.claude/judge/<branch>.md: CHECKS_SHA, H
 SPEC_STARTED, INTERRUPTIONS), the verdict file sections (judge_fails, judge_tokens), git
 (checks, correct_checks, round_date) and gh (PR state, times, approvals, comments). Mutants,
 QA bounces and session tokens are typed, because nothing in the repo knows them.
+--session ID fills usage_output and usage_total by asking a transcript tally tool what that session
+and its subagents used: `<tool> --session ID --by model --csv`, whose output_tokens and total_tokens
+columns are summed over the rows it prints. The tool is the config's usage_command, else cc-tally on
+PATH or in ~/.cargo/bin. Without --session, without the tool, or when the tool fails, the two cells
+are blank and the reason goes to stderr; the row is written all the same.
 --refresh re-reads gh for every row whose pr_state is OPEN and rewrites the file.
 --outcomes fills the three defect-escape columns (qa_bounces from the Jira changelog,
 human_review_comments from gh, prod_incidents from Sentry; rules in docs/metrics.md, "Outcomes") on
@@ -25,9 +30,11 @@ Timestamps are UTC to the minute. Blank means not captured; 0 means counted and 
 """
 import base64
 import csv
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -42,9 +49,11 @@ COLUMNS = [
     "human_approvals", "human_review_comments", "changes_requested",
     "plan_approved_utc", "packet_utc", "pushed_utc", "pr_opened_utc", "pr_merged_utc",
     "plan_to_push_min", "open_to_merge_h",
-    "spec_started_utc", "session_tokens", "judge_tokens", "interruptions",
+    "spec_started_utc", "session_tokens", "judge_tokens", "usage_output", "usage_total", "interruptions",
     "note",
 ]
+DEFAULT_USAGE_TOOL = "cc-tally"
+DEFAULT_USAGE_FALLBACK = "~/.cargo/bin/cc-tally"
 FMT = "%Y-%m-%dT%H:%MZ"
 DEFAULT_KEY_REGEX = r"\b[A-Z]{2,}-\d+"
 
@@ -62,6 +71,16 @@ class Unreachable(Exception):
 
 def sh(args, cwd=None):
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False).stdout
+
+
+def tool(args):
+    """Run a program for its exit status, stdout and stderr; one that cannot be started is a failure,
+    not an exception."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, check=False)
+    except OSError as e:
+        return 127, "", str(e)
+    return p.returncode, p.stdout, p.stderr
 
 
 def utc_of_file(path):
@@ -135,6 +154,47 @@ def verdict_fields(root, branch):
         seen = True
         tokens += sum(int(g) for g in m.groups())
     return str(fails), (str(tokens) if seen else "")
+
+
+def usage_command(root, which=shutil.which, fallback=DEFAULT_USAGE_FALLBACK):
+    """The transcript tally tool: the config's usage_command, else cc-tally on PATH, else the copy
+    `cargo install` leaves in ~/.cargo/bin (a shell started before the install has no PATH entry for
+    it). '' when there is none."""
+    configured = harness_config(root).get("usage_command")
+    if configured:
+        return os.path.expanduser(configured)
+    found = which(DEFAULT_USAGE_TOOL)
+    if found:
+        return found
+    fallback = os.path.expanduser(fallback)
+    return fallback if os.path.exists(fallback) else ""
+
+
+def usage_fields(session, command, run=tool):
+    """(usage_output, usage_total, problem) for one session and its subagents.
+
+    usage_output = output tokens; usage_total = input + cache write + cache read + output, the same
+    four counts judge_tokens adds up. Both are summed over the rows `command --session <id> --by model
+    --csv` prints. Blank, with the reason in `problem`, when the tool is missing, fails or prints
+    something else; blank with no reason when no session was named. Never 0 for "not measured"."""
+    if not session:
+        return "", "", ""
+    if not command:
+        return "", "", f"no {DEFAULT_USAGE_TOOL} on PATH or at {DEFAULT_USAGE_FALLBACK}, and no usage_command in the config"
+    code, out, err = run([command, "--session", session, "--by", "model", "--csv"])
+    if code != 0:
+        lines = [line.strip() for line in (err or "").splitlines() if line.strip()]
+        said = next((line for line in lines if line.lower().startswith("error")), lines[-1] if lines else "")
+        return "", "", said or f"{command} exited with status {code}"
+    rows = list(csv.DictReader(io.StringIO(out or "")))
+    if not rows:
+        return "", "", f"{command} printed no rows for session {session}"
+    try:
+        output = sum(int(r["output_tokens"]) for r in rows)
+        total = sum(int(r["total_tokens"]) for r in rows)
+    except (KeyError, TypeError, ValueError):
+        return "", "", f"{command} did not print output_tokens and total_tokens as numbers"
+    return str(output), str(total), ""
 
 
 def git_fields(root, checks_sha, head, base):
@@ -542,6 +602,10 @@ def build_row(root, branch, pr, opts):
     mut_run, mut_surv = "", ""
     if opts.get("mutants"):
         mut_run, mut_surv = opts["mutants"].split("/", 1)
+    usage_output, usage_total, usage_problem = usage_fields(opts.get("session", ""), usage_command(root))
+    if usage_problem:
+        # stderr, so a --dry-run's stdout stays exactly the row
+        print(f"usage not measured ({usage_problem}): usage_output and usage_total left blank", file=sys.stderr)
     row = {
         "repo": slug.split("/")[-1] if slug else os.path.basename(root),
         "ticket": ticket_of(branch, key_regex(root)), "branch": branch, "pr": str(pr) if pr else "",
@@ -559,6 +623,7 @@ def build_row(root, branch, pr, opts):
         "spec_started_utc": pk.get("SPEC_STARTED", ""),
         "session_tokens": opts.get("session_tokens", ""),
         "judge_tokens": judge_tokens,
+        "usage_output": usage_output, "usage_total": usage_total,
         "interruptions": pk.get("INTERRUPTIONS", ""),
         "note": opts.get("note", ""),
     }
@@ -570,7 +635,7 @@ def csv_path(root):
 
 
 def read_rows(root):
-    """Every row, with columns the file predates (prod_incidents) present and blank."""
+    """Every row, with columns the file predates (prod_incidents, usage_output, usage_total) present and blank."""
     with open(csv_path(root), encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     for r in rows:
@@ -606,7 +671,6 @@ def append(root, row, dry):
 
 
 def csv_line(row):
-    import io
     buf = io.StringIO()
     csv.DictWriter(buf, fieldnames=COLUMNS).writerow(row)
     return buf.getvalue()

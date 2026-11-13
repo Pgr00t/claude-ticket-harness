@@ -151,10 +151,10 @@ The PR being merged to `main` ends the session. Promotion to a release branch is
 Right after the PR is open, append the ticket's row to `.claude/metrics.csv` (columns in `docs/metrics.md` of the harness repo):
 
 ```
-python3 -I ~/.claude/hooks/metrics-row.py <repo root> <branch> <pr number> --mutants <run>/<survived> --qa <bounces so far, 0 if none> --session-tokens <n>
+python3 -I ~/.claude/hooks/metrics-row.py <repo root> <branch> <pr number> --mutants <run>/<survived> --qa <bounces so far, 0 if none> --session-tokens <n> --session <this session's id>
 ```
 
-It reads the packet (`ROUNDS`, `SPEC_STARTED`, `INTERRUPTIONS`), the verdict sections (judge FAILs and tokens), git (checks, Correct checks, round date) and gh (PR state, times, approvals, comments). The three typed values come from the checks review (mutants), the tracker's history (bounces) and this session's usage: `get_usage` for this session in the app, `/cost` in the CLI, input plus output tokens. `--dry-run` prints the row without appending. The row log and the metrics row describe the same round, written at the same time.
+It reads the packet (`ROUNDS`, `SPEC_STARTED`, `INTERRUPTIONS`), the verdict sections (judge FAILs and tokens), git (checks, Correct checks, round date) and gh (PR state, times, approvals, comments). The three typed values come from the checks review (mutants), the tracker's history (bounces) and this session's usage: `get_usage` for this session in the app, `/cost` in the CLI, input plus output tokens. `--session` is this session's id, the UUID in your scratchpad directory's path (it also names this session's transcript under `~/.claude/projects/`); with it the helper measures what the session and its subagents used from the transcripts and fills `usage_output` and `usage_total`. If it prints `usage not measured (...)`, say so in the round log and leave the cells blank; do not type a number into them. `--dry-run` prints the row without appending. The row log and the metrics row describe the same round, written at the same time.
 
 At the fifth-ticket review below, first run `python3 -I ~/.claude/hooks/metrics-row.py --refresh <repo root>`, which re-reads gh for every row whose PR was still open and fills in the merge time; QA bounces that happened after a row was written are corrected by hand from the tracker's history.
 

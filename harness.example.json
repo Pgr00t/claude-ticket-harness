@@ -25,6 +25,7 @@
     "extra_allowed_tools": ["Bash(poetry run pytest *)", "Bash(npx vitest run *)", "Bash(npx tsc *)"]
   },
   "ticket_key_regex": "\\b[A-Z]{2,}-\\d+",
+  "usage_command": "cc-tally",
   "worktree_links": ["CLAUDE.md", ".claude", "docs/agents", "TODOS.md", ".env", ".env.test", "node_modules"],
   "worktree_venv_hint": "poetry install",
   "formatters": {
