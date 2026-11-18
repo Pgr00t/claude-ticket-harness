@@ -11,7 +11,7 @@ The `/ticket` skill (`skills/ticket/SKILL.md`) is the only procedure. In order:
 3. **Plan and approval**: three lists (Checks, Edits, Verify). The user approves once and walks away.
 4. **Checks**: tests written from the Acceptance line, run red for the stated reason, committed alone as `<KEY>: Add checks for ...`. That commit's hash is `CHECKS_SHA`.
 5. **Build**: edit the source tree until the checks are green, ten rounds at most, then one refactor pass. A builder subagent on a cheaper model does steps 4 and 5; the parent session does the rest.
-6. **Verify**: the diff gate (`git diff --quiet $CHECKS_SHA HEAD -- <tests>`), the Verify line, the suite, lint, three parallel reviewers (scope, vacuous checks, wiring; the checks reviewer mutates the build and names every mutant the checks let live; the scope reviewer also writes the one-line deploy order the packet carries as `DEPLOY_AND_PROMOTION`), then one row in the round log.
+6. **Verify**: the diff gate (`git diff --quiet $CHECKS_SHA HEAD -- <tests>`), the Verify line, the suite, lint, three parallel reviewers (scope, vacuous checks, wiring; the checks reviewer mutates the build and names every mutant the checks let live; the scope reviewer also writes the one-line deploy order the packet carries as `DEPLOY_AND_PROMOTION`), a fourth reviewer on access when the diff touches a route, a schema, a permission check, a query, logging or an outbound call (who can call it, whose rows it reads or writes, what it returns or logs that the caller should not see; one line per touched route), then one row in the round log.
 7. **PR**: the judge packet, the push (gated), the PR, the metrics row.
 8. **Close**, and every fifth row, the review that rewrites the "How to work" section of `CLAUDE.md`.
 
