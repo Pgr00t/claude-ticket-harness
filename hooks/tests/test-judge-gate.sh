@@ -237,6 +237,9 @@ run_gate "$PUSH" "$R"; expect_deny 'a Makefile change with no deploy line is ref
 R="$T/deploy-testword"; new_repo "$R"
 printf 'def test_new(): assert "beat_schedule" == "beat_schedule"\n' > "$R/tests/test_new.py"; commit_all "$R" 'KEY-1: Correct check test_new'; packet "$R"
 run_gate "$PUSH" "$R"; expect_pass 'the task-pattern grep ignores test files, so a test mentioning beat_schedule needs no deploy line'
+R="$T/deploy-underscore-testpath"; new_repo "$R"; config "$R" '{"test_paths":["tests/","__tests__/*"]}'
+surface_commit "$R" app/services/jobs.py $'@shared_task\ndef nightly(): pass'
+run_gate "$PUSH" "$R"; expect_deny 'a test path that begins with an underscore (a web default) does not silence the pattern scan' 'app/services/jobs.py'
 R="$T/deploy-config"; new_repo "$R"; surface_commit "$R" app/queue/tasks.py 'def job(): pass'
 run_gate "$PUSH" "$R"; expect_pass 'a path outside the default surface needs no deploy line'
 config "$R" '{"deploy":{"paths":["app/queue/"]}}'

@@ -159,7 +159,9 @@ else
   DEPLOY_PATHSPEC=('.github/workflows/' 'Dockerfile*' '*/Dockerfile*' 'docker/' 'alembic/' 'migrations/' 'Makefile')
 fi
 if cfg_has '.deploy.patterns'; then DEPLOY_TASK_RE=$(cfg '.deploy.patterns' ''); else DEPLOY_TASK_RE='@(celery_app|app)\.task|@shared_task|beat_schedule|add_periodic_task'; fi
-NOT_TESTS=(); for p in "${TEST_PATHSPEC[@]}"; do NOT_TESTS+=(":!$p"); done
+# The long form: git reads the characters after a short `:!` as more magic, so `:!__tests__/*` (a default test
+# path of a web repo) is a fatal "Unimplemented pathspec magic '_'" that 2>/dev/null turned into an empty scan.
+NOT_TESTS=(); for p in "${TEST_PATHSPEC[@]}"; do NOT_TESTS+=(":(exclude)$p"); done
 DEPLOY_SURFACE=""
 [ ${#DEPLOY_PATHSPEC[@]} -eq 0 ] || DEPLOY_SURFACE=$(git diff --name-only "$BASE" HEAD -- "${DEPLOY_PATHSPEC[@]}" 2>/dev/null)
 [ -z "$DEPLOY_TASK_RE" ] || DEPLOY_SURFACE=$(printf '%s\n%s\n' "$DEPLOY_SURFACE" "$(git diff --name-only -G "$DEPLOY_TASK_RE" "$BASE" HEAD -- . "${NOT_TESTS[@]}" 2>/dev/null)")
