@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for hooks/judge-gate.sh: the command filter, the target-repo rules, the packet and lock checks,
-# the checks-commit rule, the deploy-surface rule, the green-suite requirement, the time budget, the config
+# the checks-commit rule, the deploy-surface rule, the outside-systems rule, the green-suite requirement, the time budget, the config
 # file, and the judge round trip. Everything runs against throwaway git repos under a temp dir, with fake
 # `poetry` and `claude` binaries first on PATH, so no real suite runs and no real judge is started. Nothing
 # outside the temp dir is touched.
@@ -245,6 +245,43 @@ config "$R" '{"deploy":{"paths":["app/queue/"],"patterns":"def job"}}'; surface_
 run_gate "$PUSH" "$R"; expect_deny 'deploy.patterns from the config replaces the task regex' 'app/other.py'
 R="$T/deploy-off"; new_repo "$R"; surface_commit "$R" Dockerfile 'FROM python:3.11'; config "$R" '{"deploy":{"paths":[],"patterns":""}}'
 run_gate "$PUSH" "$R"; expect_pass 'an empty deploy.paths and an empty deploy.patterns switch the rule off'
+
+echo "# outside systems: a diff with a call to a model or a third-party API must carry an OUTSIDE_SYSTEMS line of ten or more words"
+outside_line() { printf 'OUTSIDE_SYSTEMS: %s\n' "$2" >> "$1/.claude/judge/KEY-1-thing.md"; } # $1 = repo, $2 = text after the label
+reason() { printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason'; }
+MEASURED='the summary call with the new cap: live response read during the round, finish_reason stop'
+R="$T/outside-none"; new_repo "$R"
+run_gate "$PUSH" "$R"; expect_pass 'a diff with no outside call needs no outside-systems line'
+grep -q 'which does not prove the diff changes no such call): none' "$FAKE_CLAUDE_ARGS" && ok 'and the judge is told the mechanical scan found none' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'and the judge is told the mechanical scan found none'; }
+R="$T/outside-call"; new_repo "$R"; surface_commit "$R" app/llm.py 'r = client.chat.completions.create(model="m")'
+run_gate "$PUSH" "$R"; expect_deny 'a model call with no outside-systems line is refused, naming the file' 'app/llm.py'
+reason | grep -q 'no OUTSIDE_SYSTEMS: line with at least ten words' && ok 'and the missing line is named' || bad 'and the missing line is named'
+outside_line "$R" 'none, no call'; run_gate "$PUSH" "$R"; expect_deny 'a three-word outside-systems line is refused' '(found 3)'
+packet "$R"; outside_line "$R" "$MEASURED"; run_gate "$PUSH" "$R"; expect_pass 'the same diff with a ten-word line reaches the judge'
+grep -q '8. Outside systems: the OUTSIDE_SYSTEMS line of the packet must match the diff' "$FAKE_CLAUDE_ARGS" \
+  && grep -q 'which does not prove the diff changes no such call): app/llm.py' "$FAKE_CLAUDE_ARGS" \
+  && grep -q 'A line that says none while the diff changes such a call is a FAIL' "$FAKE_CLAUDE_ARGS" \
+  && grep -q 'one line per step 1 to 8' "$FAKE_CLAUDE_ARGS" \
+  && ok 'the judge is given step 8, the file with the call, the none rule and eight steps to report' || { OUT="$(cat "$FAKE_CLAUDE_ARGS")"; bad 'the judge is given step 8, the file with the call, the none rule and eight steps to report'; }
+R="$T/outside-http"; new_repo "$R"; surface_commit "$R" app/hook.py 'resp = httpx.post(url, json=body)'
+run_gate "$PUSH" "$R"; expect_deny 'an HTTP client call is an outside call too' 'app/hook.py'
+R="$T/outside-testword"; new_repo "$R"
+printf 'def test_new(): assert "chat.completions" == "chat.completions"\n' > "$R/tests/test_new.py"; commit_all "$R" 'KEY-1: Correct check test_new'; packet "$R"
+run_gate "$PUSH" "$R"; expect_pass 'the call-pattern grep ignores test files, so a test that stubs the client needs no line'
+R="$T/outside-config"; new_repo "$R"; surface_commit "$R" app/core/llm/prompt.py 'PROMPT = "Summarise the meeting"'
+run_gate "$PUSH" "$R"; expect_pass 'with no outside.paths configured, a prompt file needs no line'
+config "$R" '{"outside":{"paths":["app/core/llm/"]}}'
+run_gate "$PUSH" "$R"; expect_deny 'outside.paths from the config marks the code that wraps outside calls' 'app/core/llm/prompt.py'
+config "$R" '{"outside":{"patterns":"vendor_call\\("}}'; surface_commit "$R" app/v.py 'vendor_call(1)'
+run_gate "$PUSH" "$R"; expect_deny 'outside.patterns from the config replaces the call regex' 'app/v.py'
+reason | grep -q 'app/core/llm/prompt.py' && bad 'and a config without outside.paths has no path surface' || ok 'and a config without outside.paths has no path surface'
+R="$T/outside-off"; new_repo "$R"; surface_commit "$R" app/llm.py 'r = client.chat.completions.create(model="m")'; config "$R" '{"outside":{"paths":[],"patterns":""}}'
+run_gate "$PUSH" "$R"; expect_pass 'an empty outside.paths and an empty outside.patterns switch the rule off'
+R="$T/outside-evidence"; new_repo "$R"; outside_line "$R" 'the summary call, live response in .claude/verify/KEY-1.live.json.'
+run_gate "$PUSH" "$R"; expect_deny 'an evidence file the line names must be on disk, whatever the diff touches' 'names evidence that is not on disk'
+[ "$(reason | tail -1)" = '.claude/verify/KEY-1.live.json' ] && ok 'and the missing file is named without the full stop that ends the sentence' || bad 'and the missing file is named without the full stop that ends the sentence'
+mkdir -p "$R/.claude/verify"; printf '{}\n' > "$R/.claude/verify/KEY-1.live.json"
+run_gate "$PUSH" "$R"; expect_pass 'with the evidence file on disk the push reaches the judge'
 
 echo "# config: .claude/harness.json in the target repo"
 R="$T/config"; new_repo "$R"

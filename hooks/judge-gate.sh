@@ -171,6 +171,38 @@ if [ -n "$DEPLOY_SURFACE" ] && [ "$DEPLOY_WORDS" -lt 10 ]; then
 fi
 DEPLOY_SURFACE_TEXT=${DEPLOY_SURFACE:-none}
 
+# Outside systems: a call to a model or a third-party API, where the build rests on what the other side returns.
+# The rule exists because three fixes in a row were built on a guess nobody had measured (a parameter the provider
+# rejected on every call, timestamps that were wall-clock where the code assumed offsets, a setting that did not
+# bound what it was said to bound), each green against a stubbed client. The evidence now lives in the packet as
+# an OUTSIDE_SYSTEMS line the scope reviewer writes (/ticket step 6); a diff with such a call and no line never
+# reaches the judge, an evidence file the line names must exist, and the judge gets the file list so it can hold
+# the line against the diff (prompt step 8). Config `outside.paths` gives the pathspecs of the code that wraps
+# outside calls (default none) and `outside.patterns` replaces the regex that marks a call (`git diff -G`, test
+# paths excluded); `[]` and "" switch each half off.
+OUTSIDE_PATHSPEC=()
+if cfg_has '.outside.paths'; then
+  while IFS= read -r p; do [ -n "$p" ] && OUTSIDE_PATHSPEC+=("$p"); done <<< "$(cfg_lines '.outside.paths')"
+fi
+if cfg_has '.outside.patterns'; then OUTSIDE_RE=$(cfg '.outside.patterns' ''); else OUTSIDE_RE='chat\.completions|responses\.create|messages\.create|(requests|httpx)\.(get|post|put|patch|delete|request)\(|ClientSession\('; fi
+OUTSIDE_SURFACE=""
+[ ${#OUTSIDE_PATHSPEC[@]} -eq 0 ] || OUTSIDE_SURFACE=$(git diff --name-only "$BASE" HEAD -- "${OUTSIDE_PATHSPEC[@]}" 2>/dev/null)
+[ -z "$OUTSIDE_RE" ] || OUTSIDE_SURFACE=$(printf '%s\n%s\n' "$OUTSIDE_SURFACE" "$(git diff --name-only -G "$OUTSIDE_RE" "$BASE" HEAD -- . "${NOT_TESTS[@]}" 2>/dev/null)")
+OUTSIDE_SURFACE=$(printf '%s\n' "$OUTSIDE_SURFACE" | grep -v '^$' | sort -u)
+OUTSIDE_LINE=$(grep -E -m1 '^OUTSIDE_SYSTEMS:' "$PACKET" | sed -E 's/^OUTSIDE_SYSTEMS:[[:space:]]*//')
+OUTSIDE_WORDS=$(printf '%s' "$OUTSIDE_LINE" | wc -w | tr -d ' ')
+if [ -n "$OUTSIDE_SURFACE" ] && [ "$OUTSIDE_WORDS" -lt 10 ]; then
+  deny "judge gate: the diff $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) touches a call to an outside system (a model or a third-party API) but the packet has no OUTSIDE_SYSTEMS: line with at least ten words after the label (found $OUTSIDE_WORDS). The scope reviewer writes it in /ticket step 6: for each call the diff adds or changes, the live response the build's assumption rests on and the file under .claude/verify/ that holds it; 'not measured' with the reason; or 'none, the diff changes no outside call' with the reason. Touched:"$'\n'"$OUTSIDE_SURFACE"
+fi
+# An evidence file the line names is a fact the gate can check, whatever the diff touches.
+OUTSIDE_MISSING=""
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  [ -e "$f" ] || OUTSIDE_MISSING="$OUTSIDE_MISSING"$'\n'"$f"
+done <<< "$(printf '%s\n' "$OUTSIDE_LINE" | grep -Eo '\.claude/verify/[A-Za-z0-9._/-]+' | sed -E 's/[.]+$//' | sort -u)"
+[ -z "$OUTSIDE_MISSING" ] || deny "judge gate: the packet's OUTSIDE_SYSTEMS: line names evidence that is not on disk, so the live response it claims cannot be read. Save the response there, or say 'not measured' with the reason. Missing:$OUTSIDE_MISSING"
+OUTSIDE_SURFACE_TEXT=${OUTSIDE_SURFACE:-none}
+
 # Mechanical lock: tests/ untouched since the checks commit, except "Correct check" commits.
 DIRTY=$(git status --porcelain -- "${TEST_PATHSPEC[@]}" | head -5)
 [ -z "$DIRTY" ] || deny "judge gate: uncommitted changes to test files (checks are locked after $CHECKS_SHA):"$'\n'"$DIRTY"
@@ -252,24 +284,27 @@ fi
 
 DIFF_STAT=$(git diff --stat "$CHECKS_SHA" HEAD | tail -30)
 if [ "$KIND" = web ]; then DIFF_EXCLUDE="':!*.test.ts' ':!*.test.tsx' ':!*.spec.ts' ':!*.spec.tsx'"; else DIFF_EXCLUDE="':!tests'"; fi
+# No apostrophes or double quotes in the prompt text: bash 3.2 (stock macOS) needs them balanced inside a
+# command substitution, heredoc or not, and an odd one is a syntax error for the whole script.
 PROMPT=$(cat <<PEOF
 You are the judge for branch $BRANCH, about to be pushed. You decide whether it is done. You never edit files. Be strict; a builder is most likely to have fooled itself on vacuous checks and unwired code.
 
 Read, in this order:
 1. CLAUDE.md (Conventions and How to work).
-2. The judge packet at $PACKET: the five-line spec (Goal, Acceptance, Out of scope, Verify, Files), the DEPLOY_AND_PROMOTION line, the Verify command and its output, and the round count. Trust the packet for the spec text only.
+2. The judge packet at $PACKET: the five-line spec (Goal, Acceptance, Out of scope, Verify, Files), the DEPLOY_AND_PROMOTION and OUTSIDE_SYSTEMS lines, the Verify command and its output, and the round count. Trust the packet for the spec text only.
 3. The checks: run \`git show $CHECKS_SHA --stat\` and read every test file it adds or changes. Each test must assert the behaviour in the Acceptance line. A test that would pass without the feature (asserts on a mock it set itself, asserts only that something exists or returns anything, never calls the code under test) is vacuous: FAIL, naming the test.
 4. The code: run \`git diff $CHECKS_SHA HEAD -- . $DIFF_EXCLUDE\` and read it. Every change must serve the Goal line. Anything the Out of scope line excludes is a FAIL.
 5. Wiring: for each new function, method or class in that diff, find a caller in the diff or in existing code with Grep. New code with no caller is a FAIL unless the spec says it is for a later ticket.
 6. Verify evidence: the packet must show the Verify command and output demonstrating the Acceptance line. Missing or unconvincing output is a FAIL.
 7. Deploy and promotion: the DEPLOY_AND_PROMOTION line of the packet must match the diff. If the diff adds or changes a background task or scheduled job, a workflow, a Dockerfile or a migration, the line must state the order in which the services (worker, API, migration) are rolled and on which release branch, and what breaks if the order is wrong; a line that says none while the diff touches one of those is a FAIL; a scope-reviewer note about deploy order (in the packet or the PR body) that the line does not carry is a FAIL. Files on the deploy surface in $BASE..HEAD, found mechanically (none means the diff touches no such path and adds no task or scheduled job): $DEPLOY_SURFACE_TEXT
+8. Outside systems: the OUTSIDE_SYSTEMS line of the packet must match the diff. If the diff adds or changes a call to a model or a third-party API (its request, its parameters, its prompt, or how its response is read), the line must name that call and either the live response that the assumption of the build rests on, with a file that holds it, or the words not measured with the reason. Open every evidence file the line names: it must be a response from the real service to the request as this diff sends it, not a stub, a fixture, the documentation of the provider or a response recorded before the change. A line that says none while the diff changes such a call is a FAIL; a changed call the line leaves out is a FAIL; evidence that does not show what the line claims is a FAIL. Not measured, with a reason, is the one caveat this report may carry: it is not a FAIL on its own, and the line for this step must then say which assumption is unmeasured, so the reader of the verdict sees it. A packet with no such line is a PASS only when the diff changes no such call. Files with an outside call in $BASE..HEAD, found mechanically (none means no configured path or pattern matched, which does not prove the diff changes no such call): $OUTSIDE_SURFACE_TEXT
 
 The test-file lock (nothing in the test paths changed after the checks commit except Correct-check commits limited to the test files of this ticket) and the unit suite (every test green) were both checked mechanically before you were called (suite summary: $SUITE). Do not re-judge either; do not fail step 1 on the lock, and do not explain away any number. More generally: never rationalise a discrepancy. If the evidence for a step is missing or you could not check it, that step is a FAIL, not a PASS with a caveat.
 
 Diff stat since the checks commit:
 $DIFF_STAT
 
-Answer with a short report: one line per step 1 to 7, PASS or FAIL with file:line or test name for every FAIL, so the builder can act without guessing. The final line must be exactly VERDICT: PASS or VERDICT: FAIL.
+Answer with a short report: one line per step 1 to 8, PASS or FAIL with file:line or test name for every FAIL, so the builder can act without guessing. The final line must be exactly VERDICT: PASS or VERDICT: FAIL.
 PEOF
 )
 

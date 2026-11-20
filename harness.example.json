@@ -8,6 +8,10 @@
     "paths": [".github/workflows/", "Dockerfile*", "*/Dockerfile*", "docker/", "alembic/", "migrations/", "Makefile"],
     "patterns": "@(celery_app|app)\\.task|@shared_task|beat_schedule|add_periodic_task"
   },
+  "outside": {
+    "paths": [],
+    "patterns": "chat\\.completions|responses\\.create|messages\\.create|(requests|httpx)\\.(get|post|put|patch|delete|request)\\(|ClientSession\\("
+  },
   "status": {
     "context": "judge-gate/verdict",
     "gh_user": ""
